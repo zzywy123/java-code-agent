@@ -50,9 +50,11 @@ class WorkflowState(TypedDict, total=False):
     search_artifact: SearchArtifact | None
     test_result: TestResultArtifact | None
     review_result: ReviewArtifact | None
+    memory_result: dict[str, Any] | None
     rework_count: int
     final_answer: str | None
     error: str | None
+    approval_rejected: bool
 
 
 READ_TOOLS = {"list_files", "read_file", "search_code", "git_status", "git_diff", "git_log"}
@@ -72,6 +74,7 @@ def create_workflow(
     session_manager: SessionManager,
     repo_root: Any,
     mcp_adapter: Any | None = None,
+    require_approval: bool = True,
 ):
     """Create the persisted parent graph with a restricted Coder subgraph."""
     permissions = PermissionManager()
@@ -111,6 +114,7 @@ def create_workflow(
         llm=llm,
         checkpointer=False,
         context_provider=context_provider,
+        require_approval=require_approval,
     )
 
     def supervisor_node(state: WorkflowState) -> dict:
@@ -120,15 +124,20 @@ def create_workflow(
         return {
             "task": task,
             "route": route,
-            "trace_id": state.get("trace_id") or str(uuid.uuid4()),
+            "trace_id": state["trace_id"],
             "iteration": state.get("iteration", 0),
             "consecutive_failures": state.get("consecutive_failures", 0),
             "pending_tool_calls": state.get("pending_tool_calls", []),
             "patches": state.get("patches", []),
             "agent_artifacts": state.get("agent_artifacts", []),
+            "search_artifact": None,
+            "test_result": None,
+            "review_result": None,
+            "memory_result": None,
             "rework_count": state.get("rework_count", 0),
             "final_answer": None,
             "error": None,
+            "approval_rejected": False,
         }
 
     def route_from_supervisor(state: WorkflowState) -> str:
@@ -246,6 +255,30 @@ def create_workflow(
             return {"final_answer": f"测试{'通过' if test_result.success else '失败'}：{test_result.command}"}
         return {"final_answer": "工作流已结束。"}
 
+    def memory_node(state: WorkflowState) -> dict:
+        review = state.get("review_result")
+        test_result = state.get("test_result")
+        task = state.get("task", "")
+        approved = (
+            state.get("route") == "coding_workflow"
+            and review is not None
+            and review.approved
+            and test_result is not None
+            and test_result.success
+            and not state.get("approval_rejected", False)
+        )
+        result = None
+        if approved and not state.get("error"):
+            result = session_manager.capture_workflow_decision(
+                task,
+                state.get("final_answer") or "",
+                approved=approved,
+            )
+        return {
+            "memory_result": result,
+            "final_answer": state.get("final_answer"),
+        }
+
     graph = StateGraph(WorkflowState)
     graph.add_node("supervisor", traced_node("supervisor.route", supervisor_node))
     graph.add_node("researcher", traced_node("researcher.retrieve", researcher_node))
@@ -255,6 +288,7 @@ def create_workflow(
     graph.add_node("verifier", traced_node("verifier.review", verifier_node))
     graph.add_node("rework", traced_node("workflow.rework", rework_node))
     graph.add_node("finish", traced_node("workflow.finish", finish_node))
+    graph.add_node("memory", traced_node("memory.capture_decision", memory_node))
 
     graph.add_edge(START, "supervisor")
     graph.add_conditional_edges(
@@ -272,12 +306,17 @@ def create_workflow(
         lambda state: "finish" if state.get("route") == "researcher" else "coder",
         {"finish": "finish", "coder": "coder"},
     )
-    graph.add_edge("coder", "collect_change")
+    graph.add_conditional_edges(
+        "coder",
+        lambda state: "finish" if state.get("approval_rejected") or state.get("error") else "collect",
+        {"finish": "finish", "collect": "collect_change"},
+    )
     graph.add_edge("collect_change", "tester")
     graph.add_conditional_edges("tester", route_after_tester, {"verifier": "verifier", "finish": "finish"})
     graph.add_conditional_edges("verifier", route_after_verifier, {"rework": "rework", "finish": "finish"})
     graph.add_edge("rework", "coder")
-    graph.add_edge("finish", END)
+    graph.add_edge("finish", "memory")
+    graph.add_edge("memory", END)
     return graph.compile(checkpointer=session_manager.get_checkpointer())
 
 
@@ -286,14 +325,20 @@ def initial_workflow_state(query: str, session_id: str) -> WorkflowState:
         "messages": [HumanMessage(content=query)],
         "task": query,
         "session_id": session_id,
+        "trace_id": str(uuid.uuid4()),
         "iteration": 0,
         "consecutive_failures": 0,
         "pending_tool_calls": [],
         "patches": [],
         "agent_artifacts": [],
+        "search_artifact": None,
+        "test_result": None,
+        "review_result": None,
+        "memory_result": None,
         "rework_count": 0,
         "final_answer": None,
         "error": None,
+        "approval_rejected": False,
     }
 
 
@@ -312,7 +357,9 @@ def _format_research_context(artifact: SearchArtifact) -> str:
             f"- {source.file_path}:{source.start_line}-{source.end_line} "
             f"{source.symbol_signature}\n{source.content[:1200]}"
         )
-    if not artifact.results:
+    for evidence in artifact.tool_evidence[:3]:
+        lines.append(f"- 只读工具证据：\n{evidence[:4000]}")
+    if not artifact.results and not artifact.tool_evidence:
         lines.append("- 未检索到充分证据，Coder必须使用只读工具继续定位，禁止猜测。")
     return "\n".join(lines)
 

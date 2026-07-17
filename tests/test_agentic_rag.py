@@ -183,6 +183,20 @@ class TestAgenticRAG:
         assert result.rounds_used == 1
         assert not result.degraded
 
+    def test_sufficient_first_round_skips_query_rewrite(self):
+        config = RAGConfig(max_retrieval_rounds=3, rerank_top_k=5)
+        search = MagicMock()
+        search.search.return_value = [_make_search_result()]
+        rewriter = MagicMock()
+        judge = MagicMock()
+        judge.judge.return_value = (True, 0.9, "direct query matched")
+        rag = AgenticRAG(config, search, rewriter, judge)
+
+        result = rag.retrieve("Main.main")
+
+        assert result.rounds_used == 1
+        rewriter.rewrite.assert_not_called()
+
     def test_multi_round_retrieval(self):
         config = RAGConfig(max_retrieval_rounds=3, rerank_top_k=5)
         mock_search = MagicMock()

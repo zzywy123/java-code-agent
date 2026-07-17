@@ -85,7 +85,9 @@ class VerifierAgent:
             tool_call_id="verifier_diff",
             path="",
         )
-        real_diff = diff_result.output if diff_result.status.value == "success" else ""
+        real_diff = ""
+        if diff_result.status.value == "success" and diff_result.output != "没有变更":
+            real_diff = diff_result.output
 
         # Extract artifacts from context
         code_change: CodeChangeArtifact | None = None
@@ -114,11 +116,11 @@ class VerifierAgent:
             )
 
         # Use LLM for code review if available
-        if self._llm and code_change:
-            return self._llm_review(code_change, test_result, real_diff)
+        if self._llm and (code_change or real_diff):
+            return self._llm_review(task, code_change, test_result, real_diff)
 
         # Rule-based review
-        return self._rule_based_review(code_change, test_result)
+        return self._rule_based_review(code_change, test_result, real_diff)
 
     def approve(self, artifact: ReviewArtifact) -> bool:
         """Check if a review artifact represents approval."""
@@ -126,13 +128,16 @@ class VerifierAgent:
 
     def _llm_review(
         self,
-        code_change: CodeChangeArtifact,
+        task: str,
+        code_change: CodeChangeArtifact | None,
         test_result: TestResultArtifact | None,
         real_diff: str = "",
     ) -> ReviewArtifact:
         """Use LLM for code review."""
-        context_parts = [f"修改描述：{code_change.description}"]
-        if code_change.affected_files:
+        context_parts = [f"审查任务：{task}"]
+        if code_change:
+            context_parts.append(f"修改描述：{code_change.description}")
+        if code_change and code_change.affected_files:
             context_parts.append(f"影响文件：{', '.join(code_change.affected_files)}")
         if test_result:
             context_parts.append(f"测试结果：{'通过' if test_result.success else '失败'}")
@@ -162,22 +167,23 @@ class VerifierAgent:
         except Exception as e:
             logger.warning("LLM review failed: %s", e)
 
-        return self._rule_based_review(code_change, test_result)
+        return self._rule_based_review(code_change, test_result, real_diff)
 
     def _rule_based_review(
         self,
         code_change: CodeChangeArtifact | None,
         test_result: TestResultArtifact | None,
+        real_diff: str = "",
     ) -> ReviewArtifact:
         """Simple rule-based review."""
         issues: list[str] = []
         suggestions: list[str] = []
 
-        if not code_change:
-            issues.append("没有代码修改信息")
+        if not code_change and not real_diff:
+            issues.append("工作区没有可审查的 Git Diff")
             return ArtifactFactory.create_review_artifact(
                 approved=False, issues=issues,
-                summary="缺少代码修改上下文",
+                summary="缺少真实代码变更",
             )
 
         # Check if tests passed
@@ -187,7 +193,7 @@ class VerifierAgent:
             issues.append(f"测试失败: {test_result.tests_failed} 个")
 
         # Check file count
-        if len(code_change.affected_files) > 5:
+        if code_change and len(code_change.affected_files) > 5:
             suggestions.append("修改涉及较多文件，建议分步提交")
 
         approved = len(issues) == 0

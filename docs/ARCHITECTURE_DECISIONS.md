@@ -10,11 +10,11 @@ Phase 2 的独立 Agent 类不能代替真实执行链路，因此新增父级 L
 
 ## ADR-013：MCP 只作为协议适配层
 
-MCP Server 使用官方 Python SDK 和 stdio transport，复用现有 ToolRegistry。Researcher 使用只读 MCP Server；权限在 Client Adapter 和 Server 两侧都校验。MCP 不复制文件、Git、Patch 或构建逻辑。
+MCP Server 使用官方 Python SDK 和 stdio transport，复用现有 ToolRegistry，不复制文件、Git 或搜索实现。运行时先执行 `initialize → tools/list` 缓存能力；Researcher 的搜索和直接 Git 读取优先走 MCP，返回内容写入 `SearchArtifact.tool_evidence` 并进入后续提示。Client Adapter 和 Server 双侧校验 Researcher 只读权限，调用生成 `mcp.<tool>` Trace；协议失败或工具未声明时回退本地只读 ToolRegistry。
 
 ## ADR-014：长期记忆只保存可复用决策
 
-长期记忆允许保存用户偏好、项目约定和架构决策。代码事实、Bug 状态和测试结果必须从当前工作区或工具重新验证，不能直接相信旧记忆。
+成功工作流在结束前进入 Memory 节点，模型只能用严格 JSON 提取 preference、convention 或 decision；内容哈希作为稳定 key 去重，提取异常不会使主流程失败。`AppService.remember_project_fact` 和 CLI `/remember` 继续提供显式入口。代码事实、Bug 状态、测试结果、临时过程和未批准建议必须从当前工作区重新验证，禁止沉淀。
 
 ## ADR-015：显式写意图优先于 LLM 路由
 
@@ -43,3 +43,11 @@ CLI 和 Streamlit 通过同一个运行时工厂装配索引、LLM、MCP、Workf
 ## ADR-021：交付镜像采用非 root 与只读根文件系统
 
 容器只把用户工作区和运行时缓存挂载为可写目录，不挂载 Docker Socket。镜像移除 capabilities、启用 `no-new-privileges` 并限制 CPU、内存和 PID；宿主仓库是否可写由显式 bind mount 决定。
+
+## ADR-022：Patch 与构建使用成熟原生实现
+
+单文件 Unified Diff 先绑定到经过路径校验的目标文件，再交给 `git apply --check/apply/reverse`，不自行实现 hunk 匹配。Tester 根据 Maven/Gradle 标准构建文件选择工具；goal、task 和额外参数必须先通过结构化白名单构造器。
+
+## ADR-023：审批与任务状态分层
+
+人工审批保护 Coder 的 Patch 副作用；Patch 获批后，父工作流自动调用权限受限的 Tester，不为同一闭环重复请求审批。Session 的消息历史继续累积，但新请求必须清空 Search/Test/Review Artifact 并创建新 Trace，审批恢复和返工则延续当前任务状态。

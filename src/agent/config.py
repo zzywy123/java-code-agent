@@ -140,6 +140,16 @@ class EmbeddingConfig(BaseSettings):
     openai_model: str = Field(default="text-embedding-3-small")
     dimension: int = Field(default=512, description="Embedding dimension")
     batch_size: int = Field(default=32, description="Batch size for embedding")
+    local_files_only: bool = Field(
+        default=True,
+        description="Load local embedding models from cache without contacting Hugging Face",
+    )
+    hub_timeout_seconds: int = Field(
+        default=10,
+        ge=1,
+        le=120,
+        description="Hugging Face timeout when online model loading is enabled",
+    )
 
 
 class RAGConfig(BaseSettings):
@@ -192,6 +202,16 @@ class MemoryConfig(BaseSettings):
     max_summary_tokens: int = Field(default=1000, description="Max tokens for summary")
     long_term_persist_dir: str = Field(default=".memory", description="Long-term memory storage dir")
     checkpoint_dir: str = Field(default=".checkpoints", description="LangGraph checkpointer dir")
+    auto_capture_decisions: bool = Field(
+        default=True,
+        description="Extract durable decisions after a workflow completes successfully",
+    )
+    auto_capture_max_chars: int = Field(
+        default=2000,
+        ge=200,
+        le=10000,
+        description="Maximum task/answer characters sent to decision extraction",
+    )
 
 
 class MCPConfig(BaseSettings):

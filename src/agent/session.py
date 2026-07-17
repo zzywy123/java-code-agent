@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import logging
 import sqlite3
 import uuid
 from pathlib import Path
 
-from langchain_core.messages import AIMessage, BaseMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.sqlite import SqliteSaver
 
@@ -15,6 +17,23 @@ from agent.config import MemoryConfig
 from agent.memory.long_term import LongTermMemory
 from agent.memory.short_term import ShortTermMemory
 from agent.memory.summary import SummaryMemory
+
+logger = logging.getLogger(__name__)
+
+DECISION_CAPTURE_PROMPT = """\
+你是项目长期记忆提取器。判断一次已完成工作流是否形成了以后仍应遵守的稳定信息。
+
+只允许保存：
+- preference：用户明确表达的长期偏好
+- convention：项目长期约定、编码规范或协作规则
+- decision：已确认的架构/技术决策及关键理由
+
+禁止保存：当前代码内容、文件位置、Bug 状态、测试结果、临时任务过程、未经批准的建议，
+以及能从仓库重新读取的事实。没有值得长期保存的信息时 save 必须为 false。
+
+只输出 JSON：
+{"save": true/false, "type": "preference|convention|decision", "content": "简洁且自包含的内容"}
+"""
 
 
 class SessionManager:
@@ -82,6 +101,97 @@ class SessionManager:
     def get_storage_dir(self) -> Path:
         """Return the persistent directory shared by session-level services."""
         return self._checkpoint_dir
+
+    def remember_project_fact(self, key: str, memory_type: str, content: str) -> None:
+        """Persist one explicit reusable project preference, convention or decision."""
+        key = key.strip()
+        content = content.strip()
+        if not key or not content:
+            raise ValueError("记忆 key 和 content 不能为空")
+        if memory_type not in {"preference", "convention", "decision"}:
+            raise ValueError("记忆类型必须是 preference、convention 或 decision")
+        self.long_term.store(key, {"type": memory_type, "content": content})
+
+    def capture_workflow_decision(
+        self,
+        task: str,
+        final_answer: str,
+        *,
+        approved: bool = True,
+    ) -> dict[str, object] | None:
+        """Extract and persist one durable decision from a successful workflow."""
+        if (
+            not self._config.auto_capture_decisions
+            or self._llm is None
+            or not approved
+            or not final_answer.strip()
+            or not self._looks_like_durable_decision(task, final_answer)
+        ):
+            return None
+
+        limit = self._config.auto_capture_max_chars
+        prompt = (
+            f"任务：\n{task[:limit]}\n\n"
+            f"最终结果：\n{final_answer[:limit]}"
+        )
+        try:
+            response = self._llm.invoke([
+                SystemMessage(content=DECISION_CAPTURE_PROMPT),
+                HumanMessage(content=prompt),
+            ])
+            raw = str(response.content or "")
+            start = raw.find("{")
+            end = raw.rfind("}")
+            if start < 0 or end < start:
+                return None
+            data = json.loads(raw[start:end + 1])
+        except Exception as exc:
+            logger.warning("Automatic decision capture failed: %s", exc)
+            return None
+
+        if data.get("save") is not True:
+            return None
+        memory_type = str(data.get("type") or "")
+        content = " ".join(str(data.get("content") or "").split())
+        if memory_type not in {"preference", "convention", "decision"} or len(content) < 8:
+            return None
+
+        digest = hashlib.sha256(
+            f"{memory_type}:{content.casefold()}".encode("utf-8")
+        ).hexdigest()[:16]
+        key = f"workflow-{digest}"
+        if self.long_term.recall(key) is not None:
+            return {
+                "saved": False,
+                "key": key,
+                "type": memory_type,
+                "content": content,
+            }
+
+        self.long_term.store(key, {
+            "type": memory_type,
+            "content": content,
+            "source": "workflow",
+        })
+        return {
+            "saved": True,
+            "key": key,
+            "type": memory_type,
+            "content": content,
+        }
+
+    @staticmethod
+    def _looks_like_durable_decision(task: str, final_answer: str) -> bool:
+        """Cheaply reject ordinary Q&A, bug facts and test-only outcomes."""
+        text = f"{task}\n{final_answer}".lower()
+        markers = (
+            "决定", "采用", "统一", "约定", "规范", "架构", "技术选型",
+            "方案", "策略", "取舍", "迁移", "替换", "长期", "偏好",
+            "继续使用", "仍使用",
+            "decision", "adopt", "convention", "architecture", "strategy",
+            "migrate", "replace", "prefer",
+        )
+        return any(marker in text for marker in markers)
 
     def build_context(
         self,

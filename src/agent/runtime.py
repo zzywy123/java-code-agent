@@ -94,6 +94,7 @@ def create_app_runtime(
         session_manager=session_manager,
         repo_root=resolved_repo,
         mcp_adapter=mcp_adapter,
+        require_approval=security_config.require_approval,
     )
     return AppRuntime(
         service=AppService(workflow, session_manager, project_root=resolved_repo),
@@ -171,6 +172,9 @@ def build_rag_index(repo_root: Path):
             from agent.indexing.vector_store import VectorStore
 
             embedding_service = EmbeddingService(embedding_config)
+            # Resolve model availability during startup. Missing local files
+            # degrade here instead of blocking the first user query.
+            embedding_service.initialize()
             chroma_dir = Path(rag_config.chroma_persist_dir).expanduser()
             if not chroma_dir.is_absolute():
                 chroma_dir = cache_dir / chroma_dir
@@ -263,4 +267,7 @@ def build_mcp_adapter(repo_root: Path):
         env=env,
         cwd=Path.cwd(),
     )
-    return MCPToolAdapter(client, PermissionManager(), AgentRole.RESEARCHER)
+    adapter = MCPToolAdapter(client, PermissionManager(), AgentRole.RESEARCHER)
+    available_tools = adapter.initialize_sync()
+    logger.info("MCP stdio ready with %d read-only tools", len(available_tools))
+    return adapter

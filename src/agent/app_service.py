@@ -208,6 +208,10 @@ class AppService:
             return self._trace_store.get_metrics()
         raise ValueError(f"未知指标范围: {scope}")
 
+    def remember_project_fact(self, key: str, memory_type: str, content: str) -> None:
+        """Explicitly persist reusable project knowledge for later Sessions."""
+        self._sessions.remember_project_fact(key, memory_type, content)
+
     def close(self) -> None:
         self._sessions.close()
 
@@ -404,7 +408,15 @@ class AppService:
                 self._append_event(session_id, "rework", {
                     "rework_count": payload.get("rework_count", 0),
                 })
-            elif node_name == "finish":
+            elif node_name == "memory":
+                result = payload.get("memory_result")
+                if result and result.get("saved"):
+                    self._append_event(
+                        session_id,
+                        "memory_saved",
+                        result,
+                        correlation_id=str(result.get("key") or "") or None,
+                    )
                 self._append_event(session_id, "done", {
                     "final_answer": payload.get("final_answer"),
                 })

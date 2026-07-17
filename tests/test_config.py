@@ -7,7 +7,15 @@ from pathlib import Path
 
 import pytest
 
-from agent.config import LLMConfig, LLMProvider, SecurityConfig, AgentConfig, load_config
+from agent.config import (
+    AgentConfig,
+    EmbeddingConfig,
+    LLMConfig,
+    LLMProvider,
+    MemoryConfig,
+    SecurityConfig,
+    load_config,
+)
 
 
 class TestLLMConfig:
@@ -62,6 +70,22 @@ class TestAgentConfig:
         cfg = AgentConfig()
         assert cfg.max_iterations == 15
         assert cfg.max_consecutive_failures == 3
+
+
+def test_memory_auto_capture_defaults_and_limits():
+    config = MemoryConfig()
+    assert config.auto_capture_decisions is True
+    assert config.auto_capture_max_chars == 2000
+    with pytest.raises(ValueError):
+        MemoryConfig(auto_capture_max_chars=100)
+
+
+def test_embedding_offline_defaults_and_timeout_limits():
+    config = EmbeddingConfig()
+    assert config.local_files_only is True
+    assert config.hub_timeout_seconds == 10
+    with pytest.raises(ValueError):
+        EmbeddingConfig(hub_timeout_seconds=0)
 
 
 class TestLoadConfig:

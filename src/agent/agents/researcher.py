@@ -17,7 +17,7 @@ from typing import Any
 
 from agent.agents.artifacts import ArtifactFactory
 from agent.agents.permission import AgentRole, PermissionManager
-from agent.models import AgentArtifact, SearchArtifact, SearchResult
+from agent.models import AgentArtifact, SearchArtifact, SearchResult, ToolResult, ToolStatus
 from agent.rag.agentic_rag import AgenticRAG
 from agent.tools.base import ToolRegistry
 
@@ -59,44 +59,50 @@ class ResearcherAgent:
         direct_request = self._parse_direct_git_request(task)
         if direct_request is not None:
             tool_name, arguments = direct_request
-            self._permissions.assert_tool_allowed(self._role, tool_name)
-            result = self._tools.execute(
-                name=tool_name,
+            result, channel = self._execute_read_tool(
+                tool_name,
+                arguments,
                 tool_call_id=f"researcher_{tool_name}",
-                **arguments,
             )
             return ArtifactFactory.create_search_artifact(
                 query=task,
-                analysis=f"直接调用只读工具 {tool_name}",
+                analysis=f"通过 {channel} 调用只读工具 {tool_name}",
                 direct_answer=result.output,
                 render_hint="diff" if tool_name == "git_diff" else "text",
             )
 
-        mcp_note = ""
-        if self._mcp is not None:
-            try:
-                identifier = self._extract_identifier(task)
-                mcp_result = self._mcp.call_tool_sync(
-                    "search_code",
-                    {"query": identifier, "path": ".", "file_pattern": "*.java"},
-                )
-                mcp_note = f"MCP search_code: {mcp_result.output[:200]}"
-            except Exception as exc:
-                logger.warning("MCP search_code failed; continuing with RAG: %s", exc)
-                mcp_note = f"MCP降级: {exc}"
-
         # Use Agentic RAG if available
         if self._rag:
+            identifier = self._extract_identifier(task)
+            tool_result, channel = self._execute_read_tool(
+                "search_code",
+                {"query": identifier, "path": ".", "file_pattern": "*.java"},
+                tool_call_id="researcher_evidence",
+            )
+            tool_evidence = []
+            if tool_result.status == ToolStatus.SUCCESS and tool_result.output:
+                tool_evidence.append(
+                    f"[{channel}:search_code query={identifier}]\n{tool_result.output[:6000]}"
+                )
+            if self._has_usable_search_output(tool_result):
+                tool_evidence.extend(self._read_hit_context(tool_result.output))
+                return ArtifactFactory.create_search_artifact(
+                    query=task,
+                    analysis=f"{channel} 一轮只读检索已命中，跳过多轮 RAG",
+                    relevant_files=[],
+                    tool_evidence=tool_evidence,
+                )
             rag_result = self._rag.retrieve(task)
             return ArtifactFactory.create_search_artifact(
                 query=task,
                 results=rag_result.sources,
-                analysis=f"{mcp_note}\nRAG 检索 {rag_result.rounds_used} 轮，"
+                analysis=f"{channel} 只读检索 + RAG {rag_result.rounds_used} 轮，"
                          f"证据{'充分' if rag_result.evidence_sufficient else '不足'}"
                          f"{'（已降级）' if rag_result.degraded else ''}",
                 relevant_files=[
                     r.chunk.slice.file_path for r in rag_result.sources[:5]
                 ],
+                tool_evidence=tool_evidence,
             )
 
         # Fallback: basic search using search_code tool
@@ -178,10 +184,10 @@ class ResearcherAgent:
 
     def search_code(self, query: str) -> list[SearchResult]:
         """Search code using the search_code tool."""
-        result = self._tools.execute(
-            name="search_code",
+        self._execute_read_tool(
+            "search_code",
+            {"query": query},
             tool_call_id="researcher_search",
-            query=query,
         )
         # Parse results into SearchResult objects
         # (simplified — in production would parse the tool output)
@@ -193,13 +199,88 @@ class ResearcherAgent:
         terms = task.split()[:5]
         query = " ".join(terms)
 
-        result = self._tools.execute(
-            name="search_code",
+        result, channel = self._execute_read_tool(
+            "search_code",
+            {"query": query},
             tool_call_id="researcher_basic",
-            query=query,
         )
 
         return ArtifactFactory.create_search_artifact(
             query=task,
-            analysis=f"基础搜索: {result.output[:200]}",
+            analysis=f"通过 {channel} 完成基础搜索",
+            tool_evidence=[result.output[:6000]] if result.output else [],
         )
+
+    def _execute_read_tool(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        *,
+        tool_call_id: str,
+    ) -> tuple[ToolResult, str]:
+        """Prefer MCP for read tools and fall back to the local registry."""
+        self._permissions.assert_tool_allowed(self._role, name)
+        if self._mcp is not None:
+            try:
+                result = self._mcp.call_tool_sync(name, arguments)
+                if result.status == ToolStatus.SUCCESS:
+                    return result, "MCP"
+                logger.warning(
+                    "MCP %s returned %s; falling back to local tools",
+                    name,
+                    result.status.value,
+                )
+            except Exception as exc:
+                logger.warning("MCP %s failed; falling back to local tools: %s", name, exc)
+
+        return (
+            self._tools.execute(
+                name=name,
+                tool_call_id=tool_call_id,
+                **arguments,
+            ),
+            "Local ToolRegistry",
+        )
+
+    @staticmethod
+    def _has_usable_search_output(result: ToolResult) -> bool:
+        """Recognize a real search hit without another model call."""
+        if result.status != ToolStatus.SUCCESS:
+            return False
+        match_count = result.metadata.get("match_count")
+        if isinstance(match_count, int):
+            return match_count > 0
+        output = result.output.strip().lower()
+        if not output:
+            return False
+        no_match_markers = ("未找到匹配", "没有找到", "no matches", "no match", "not found")
+        return not any(marker in output for marker in no_match_markers)
+
+    def _read_hit_context(self, search_output: str) -> list[str]:
+        """Read bounded source context for up to two exact search hits."""
+        evidence: list[str] = []
+        seen_paths: set[str] = set()
+        for match in re.finditer(
+            r"^\s*([^:\r\n]+\.java):(\d+):",
+            search_output,
+            flags=re.MULTILINE | re.IGNORECASE,
+        ):
+            path = match.group(1).strip()
+            if path in seen_paths:
+                continue
+            seen_paths.add(path)
+            line_number = int(match.group(2))
+            result, channel = self._execute_read_tool(
+                "read_file",
+                {
+                    "path": path,
+                    "start_line": max(1, line_number - 25),
+                    "end_line": line_number + 50,
+                },
+                tool_call_id=f"researcher_context_{len(seen_paths)}",
+            )
+            if result.status == ToolStatus.SUCCESS and result.output:
+                evidence.append(f"[{channel}:read_file]\n{result.output[:8000]}")
+            if len(seen_paths) >= 2:
+                break
+        return evidence

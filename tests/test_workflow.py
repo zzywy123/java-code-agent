@@ -10,6 +10,8 @@ from agent.models import PatchRecord, ToolResult, ToolStatus
 from agent.session import SessionManager
 from agent.tools.base import BaseTool, ToolRegistry
 from agent.workflow import create_workflow, initial_workflow_state
+from agent.workflow import CODER_TOOLS
+from agent.prompts import SYSTEM_PROMPT
 
 
 class ScriptedLLM:
@@ -59,7 +61,7 @@ class RejectOnceLLM(ScriptedLLM):
                 tool_calls=[{
                     "id": "patch-rework",
                     "name": "apply_patch",
-                    "args": {"path": "A.java", "unified_diff": "@@ -1 +1 @@\n-old\n+new"},
+                    "args": {"path": "A.java", "unified_diff": "@@ -1 +1 @@\n-new\n+newer"},
                 }],
             )
         return super().invoke(messages)
@@ -97,6 +99,7 @@ class DummyTool(BaseTool):
 
 
 def build_registry(tmp_path: Path) -> ToolRegistry:
+    (tmp_path / "pom.xml").write_text("<project/>", encoding="utf-8")
     registry = ToolRegistry()
     patch = PatchRecord(
         file_path=str(tmp_path / "A.java"),
@@ -162,6 +165,72 @@ def test_coding_workflow_interrupts_then_tests_and_verifies(tmp_path):
     assert result["review_result"].approved is True
     assert len(result["patches"]) == 1
     assert "审查通过" in result["final_answer"]
+    session.close()
+
+
+def test_workflow_can_explicitly_disable_patch_approval(tmp_path):
+    llm = ScriptedLLM()
+    session = SessionManager(MemoryConfig(
+        checkpoint_dir=str(tmp_path / "cp"),
+        long_term_persist_dir=str(tmp_path / "memory"),
+    ), llm=llm)
+    session_id = session.create_session()
+    graph = create_workflow(
+        llm=llm,
+        llm_config=LLMConfig(provider="ollama"),
+        agent_config=AgentConfig(),
+        workflow_config=WorkflowConfig(max_rework=1),
+        rag_config=RAGConfig(),
+        tool_registry=build_registry(tmp_path),
+        search_engine=EmptySearch(),
+        session_manager=session,
+        repo_root=tmp_path,
+        require_approval=False,
+    )
+
+    result = graph.invoke(
+        initial_workflow_state("修复 calculateTotal", session_id),
+        session.get_thread_config(session_id),
+    )
+
+    assert not result.get("__interrupt__")
+    assert len(result["patches"]) == 1
+    assert result["test_result"].success is True
+    session.close()
+
+
+def test_coder_prompt_matches_restricted_tool_contract():
+    assert "run_tests" not in CODER_TOOLS
+    assert "你没有 run_tests 工具" in SYSTEM_PROMPT
+
+
+def test_rejected_patch_stops_without_running_tester(tmp_path):
+    llm = ScriptedLLM()
+    session = SessionManager(MemoryConfig(
+        checkpoint_dir=str(tmp_path / "cp"),
+        long_term_persist_dir=str(tmp_path / "memory"),
+    ), llm=llm)
+    session_id = session.create_session()
+    graph = create_workflow(
+        llm=llm,
+        llm_config=LLMConfig(provider="ollama"),
+        agent_config=AgentConfig(),
+        workflow_config=WorkflowConfig(max_rework=1),
+        rag_config=RAGConfig(),
+        tool_registry=build_registry(tmp_path),
+        search_engine=EmptySearch(),
+        session_manager=session,
+        repo_root=tmp_path,
+    )
+    config = session.get_thread_config(session_id)
+
+    interrupted = graph.invoke(initial_workflow_state("修复calculateTotal", session_id), config)
+    assert interrupted["__interrupt__"]
+    result = graph.invoke(Command(resume={"approved": False}), config)
+
+    assert result["approval_rejected"] is True
+    assert result["test_result"] is None
+    assert result["final_answer"] == "操作已被用户拒绝，未修改文件。"
     session.close()
 
 
@@ -258,4 +327,41 @@ def test_git_diff_returns_real_tool_output_without_rag_answer(tmp_path):
     assert "当前快照" not in result["final_answer"]
     assert result["search_artifact"].direct_answer == result["final_answer"]
     assert result["messages"][-1].additional_kwargs["render_hint"] == "diff"
+    session.close()
+
+
+def test_new_request_resets_task_artifacts_and_trace_in_same_session(tmp_path):
+    llm = AlreadyFixedLLM()
+    session = SessionManager(MemoryConfig(
+        checkpoint_dir=str(tmp_path / "cp"),
+        long_term_persist_dir=str(tmp_path / "memory"),
+    ), llm=llm)
+    session_id = session.create_session()
+    graph = create_workflow(
+        llm=llm,
+        llm_config=LLMConfig(provider="ollama"),
+        agent_config=AgentConfig(),
+        workflow_config=WorkflowConfig(max_rework=1),
+        rag_config=RAGConfig(),
+        tool_registry=build_registry(tmp_path),
+        search_engine=EmptySearch(),
+        session_manager=session,
+        repo_root=tmp_path,
+    )
+    config = session.get_thread_config(session_id)
+
+    first = graph.invoke(
+        initial_workflow_state("请修复 calculateTotal，并运行测试", session_id),
+        config,
+    )
+    second = graph.invoke(
+        initial_workflow_state("git status", session_id),
+        config,
+    )
+
+    assert first["review_result"] is not None
+    assert second["search_artifact"] is not None
+    assert second["test_result"] is None
+    assert second["review_result"] is None
+    assert second["trace_id"] != first["trace_id"]
     session.close()

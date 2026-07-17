@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -10,9 +11,7 @@ from agent.models import ToolStatus
 from agent.tools.patch_tools import (
     ApplyPatchTool,
     UndoPatchTool,
-    apply_diff_to_content,
     compute_hash,
-    reverse_diff,
 )
 
 
@@ -49,23 +48,6 @@ class TestComputeHash:
     def test_empty_string(self):
         h = compute_hash("")
         assert len(h) == 64  # SHA-256 hex length
-
-
-class TestDiffOperations:
-    """Tests for diff parsing and application."""
-
-    def test_apply_simple_diff(self):
-        original = "line1\nold line2\nline3\n"
-        diff = "@@ -1,3 +1,3 @@\n line1\n-old line2\n+new line2\n line3"
-        result = apply_diff_to_content(original, diff)
-        assert "new line2" in result
-        assert "old line2" not in result
-
-    def test_reverse_diff(self):
-        diff = "@@ -1,3 +1,3 @@\n line1\n-old\n+new\n line3"
-        reversed_diff = reverse_diff(diff)
-        assert "+old" in reversed_diff
-        assert "-new" in reversed_diff
 
 
 class TestApplyPatchTool:
@@ -141,6 +123,62 @@ class TestApplyPatchTool:
             create_new=True,
         )
         assert result.status == ToolStatus.INVALID_ARGUMENT
+
+    def test_hunk_location_is_respected_when_content_is_duplicated(self, repo: Path):
+        target = repo / "repeated.txt"
+        target.write_text("same\nmiddle\nsame\n", encoding="utf-8")
+        tool = ApplyPatchTool(repo_root=repo)
+
+        result = tool.execute(
+            tool_call_id="location",
+            path="repeated.txt",
+            unified_diff="@@ -3 +3 @@\n-same\n+changed",
+        )
+
+        assert result.status == ToolStatus.SUCCESS
+        assert target.read_text(encoding="utf-8") == "same\nmiddle\nchanged\n"
+
+    def test_wrong_hunk_location_uses_unique_content_fallback(self, repo: Path, monkeypatch):
+        monkeypatch.setattr(
+            "agent.tools.patch_tools._run_git_apply",
+            lambda *args, **kwargs: SimpleNamespace(
+                returncode=1,
+                stderr="forced strict failure",
+                stdout="",
+            ),
+        )
+        tool = ApplyPatchTool(repo_root=repo)
+
+        result = tool.execute(
+            tool_call_id="wrong-location",
+            path="src/main/java/Calculator.java",
+            unified_diff=(
+                "@@ -999,8 +999,3 @@\n"
+                "-        return a + b;\n"
+                "+        return a + b + 1;\n"
+            ),
+        )
+
+        assert result.status == ToolStatus.SUCCESS
+        assert "唯一内容匹配回退" in result.output
+        assert "return a + b + 1;" in (
+            repo / "src" / "main" / "java" / "Calculator.java"
+        ).read_text(encoding="utf-8")
+
+    def test_content_fallback_rejects_ambiguous_replacement(self, repo: Path):
+        target = repo / "repeated.txt"
+        target.write_text("same\nmiddle\nsame\n", encoding="utf-8")
+        tool = ApplyPatchTool(repo_root=repo)
+
+        result = tool.execute(
+            tool_call_id="ambiguous",
+            path="repeated.txt",
+            unified_diff="@@ -999 +999 @@\n-same\n+changed",
+        )
+
+        assert result.status == ToolStatus.EXECUTION_ERROR
+        assert "歧义" in result.output
+        assert target.read_text(encoding="utf-8") == "same\nmiddle\nsame\n"
 
 
 class TestUndoPatchTool:
@@ -218,3 +256,24 @@ class TestUndoPatchTool:
             unified_diff="@@ -1 +1 @@\n-old\n+new",
         )
         assert result.status == ToolStatus.NOT_FOUND
+
+    def test_undo_patch_created_by_content_fallback(self, repo: Path):
+        diff = "@@ -999,9 +999,2 @@\n-        return a + b;\n+        return a - b;"
+        apply_result = ApplyPatchTool(repo_root=repo).execute(
+            tool_call_id="fallback-apply",
+            path="src/main/java/Calculator.java",
+            unified_diff=diff,
+        )
+        assert apply_result.status == ToolStatus.SUCCESS
+
+        undo_result = UndoPatchTool(repo_root=repo).execute(
+            tool_call_id="fallback-undo",
+            path="src/main/java/Calculator.java",
+            unified_diff=diff,
+            hash_before=apply_result.metadata["patch_record"]["content_hash_before"],
+        )
+
+        assert undo_result.status == ToolStatus.SUCCESS
+        assert "return a + b;" in (
+            repo / "src" / "main" / "java" / "Calculator.java"
+        ).read_text(encoding="utf-8")

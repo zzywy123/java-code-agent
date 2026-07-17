@@ -17,6 +17,7 @@ from agent.agents.artifacts import ArtifactFactory
 from agent.agents.permission import AgentRole, PermissionManager
 from agent.models import AgentArtifact, TestResultArtifact
 from agent.tools.base import ToolRegistry
+from agent.tools.build_tools import detect_build_tool
 
 logger = logging.getLogger(__name__)
 
@@ -54,8 +55,18 @@ class TesterAgent:
         # Verify execution permission
         self._permissions.assert_tool_allowed(self._role, "run_tests")
 
-        # Run Maven tests by default
-        return self.run_maven_tests(["test"])
+        run_tests = self._tools.get("run_tests")
+        repo_root = run_tests.repo_root if run_tests is not None else None
+        build_tool = detect_build_tool(repo_root) if repo_root is not None else None
+        if build_tool == "gradle":
+            return self.run_gradle_tests(["test"])
+        if build_tool == "maven":
+            return self.run_maven_tests(["test"])
+        return ArtifactFactory.create_test_result_artifact(
+            command="build tool detection",
+            exit_code=-1,
+            stderr="未找到 pom.xml、build.gradle 或 build.gradle.kts",
+        )
 
     def run_maven_tests(self, goals: list[str], module: str = "") -> TestResultArtifact:
         """Run Maven tests."""

@@ -8,6 +8,7 @@ import pytest
 
 from agent.models import ToolStatus
 from agent.tools.file_tools import ListFilesTool, ReadFileTool
+from agent.tools.search_tools import SearchCodeTool
 
 
 @pytest.fixture
@@ -65,6 +66,13 @@ class TestListFilesTool:
         result = tool.execute(tool_call_id="t5", path="../../etc")
         assert result.status == ToolStatus.DENIED
 
+    def test_list_filters_sensitive_entries(self, repo: Path):
+        (repo / "credentials.txt").write_text("token=example-secret", encoding="utf-8")
+        tool = ListFilesTool(repo_root=repo)
+        result = tool.execute(tool_call_id="sensitive", path=".")
+        assert result.status == ToolStatus.SUCCESS
+        assert "credentials.txt" not in result.output
+
 
 class TestReadFileTool:
     """Tests for read_file tool."""
@@ -103,3 +111,16 @@ class TestReadFileTool:
         tool = ReadFileTool(repo_root=repo)
         result = tool.execute(tool_call_id="t6", path="src/main/java/com/example/Main.java", start_line=1000)
         assert result.status == ToolStatus.INVALID_ARGUMENT
+
+
+class TestSearchCodeTool:
+    def test_search_filters_sensitive_files(self, repo: Path):
+        (repo / "Credentials.TXT").write_text("API_KEY=resume-demo-key", encoding="utf-8")
+        (repo / "notes.txt").write_text("resume-demo-key is documented", encoding="utf-8")
+        tool = SearchCodeTool(repo_root=repo)
+
+        result = tool.execute(tool_call_id="search", query="resume-demo-key", path=".")
+
+        assert result.status == ToolStatus.SUCCESS
+        assert "notes.txt" in result.output
+        assert "Credentials.TXT" not in result.output

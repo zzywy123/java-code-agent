@@ -18,6 +18,7 @@ EVENT_LABELS = {
     "patch_applied": "Patch 已应用",
     "test_result": "测试完成",
     "review_result": "Verifier 审查",
+    "memory_saved": "长期记忆",
     "rework": "返工",
     "token_usage": "Token 统计",
     "error": "错误",
@@ -101,6 +102,8 @@ def _event_detail(event: Any) -> str:
         return "通过" if data.get("success") else "失败"
     if event.event_type == "review_result":
         return str(data.get("summary", ""))
+    if event.event_type == "memory_saved":
+        return str(data.get("content", ""))
     if event.event_type == "error":
         return str(data.get("message", ""))
     return ""

@@ -27,6 +27,8 @@ from agent.models import (
     ReviewArtifact,
     SearchArtifact,
     TestResultArtifact,
+    ToolResult,
+    ToolStatus,
 )
 
 
@@ -239,9 +241,22 @@ class TestVerifier:
         assert len(result.issues) > 0
 
     def test_verifier_rejects_no_context(self, mock_tool_registry, permission_manager):
+        mock_tool_registry.execute.return_value.output = "没有变更"
         verifier = VerifierAgent(mock_tool_registry, permission_manager, llm=None)
         result = verifier.run("review")
         assert result.approved is False
+
+    def test_verifier_can_review_real_diff_without_code_artifact(
+        self, mock_tool_registry, permission_manager
+    ):
+        mock_tool_registry.execute.return_value.output = (
+            "Git Diff:\ndiff --git a/A.java b/A.java\n-old\n+new"
+        )
+        verifier = VerifierAgent(mock_tool_registry, permission_manager, llm=None)
+
+        result = verifier.run("review current workspace")
+
+        assert result.approved is True
 
 
 # ============================================================
@@ -255,6 +270,82 @@ class TestResearcher:
         researcher = ResearcherAgent(mock_tool_registry, permission_manager, agentic_rag=None)
         result = researcher.run("what does OrderService do?")
         assert isinstance(result, SearchArtifact)
+
+    def test_mcp_is_primary_channel_for_direct_git_reads(
+        self, mock_tool_registry, permission_manager
+    ):
+        mcp = MagicMock()
+        mcp.call_tool_sync.return_value = ToolResult(
+            tool_call_id="mcp_git_status",
+            name="git_status",
+            status=ToolStatus.SUCCESS,
+            output="MCP Git Status",
+        )
+        researcher = ResearcherAgent(
+            mock_tool_registry,
+            permission_manager,
+            agentic_rag=None,
+            mcp_adapter=mcp,
+        )
+
+        result = researcher.run("git status")
+
+        mcp.call_tool_sync.assert_called_once_with("git_status", {})
+        mock_tool_registry.execute.assert_not_called()
+        assert result.direct_answer == "MCP Git Status"
+        assert "MCP" in result.analysis
+
+    def test_mcp_search_output_becomes_downstream_tool_evidence(
+        self, mock_tool_registry, permission_manager
+    ):
+        mcp = MagicMock()
+        mcp.call_tool_sync.return_value = ToolResult(
+            tool_call_id="mcp_search_code",
+            name="search_code",
+            status=ToolStatus.SUCCESS,
+            output="src/OrderService.java:42: calculateTotal",
+        )
+        researcher = ResearcherAgent(
+            mock_tool_registry,
+            permission_manager,
+            agentic_rag=None,
+            mcp_adapter=mcp,
+        )
+
+        result = researcher.run("解释 OrderService.calculateTotal")
+
+        mock_tool_registry.execute.assert_not_called()
+        assert result.tool_evidence == ["src/OrderService.java:42: calculateTotal"]
+        assert "MCP" in result.analysis
+
+    def test_mcp_search_hit_skips_agentic_rag(
+        self, mock_tool_registry, permission_manager
+    ):
+        mcp = MagicMock()
+        mcp.call_tool_sync.return_value = ToolResult(
+            tool_call_id="mcp_search_code",
+            name="search_code",
+            status=ToolStatus.SUCCESS,
+            output="src/OrderService.java:42: calculateTotal",
+            metadata={"match_count": 1},
+        )
+        rag = MagicMock()
+        researcher = ResearcherAgent(
+            mock_tool_registry,
+            permission_manager,
+            agentic_rag=rag,
+            mcp_adapter=mcp,
+        )
+
+        result = researcher.run("解释 OrderService.calculateTotal")
+
+        rag.retrieve.assert_not_called()
+        assert "跳过多轮 RAG" in result.analysis
+        assert result.tool_evidence
+        assert any(
+            call.args[0] == "read_file"
+            for call in mcp.call_tool_sync.call_args_list
+        )
 
     @pytest.mark.parametrize(
         ("request_text", "tool_name", "arguments"),
@@ -329,3 +420,19 @@ class TestTester:
         tester = TesterAgent(mock_tool_registry, permission_manager)
         result = tester.run("run tests")
         assert isinstance(result, TestResultArtifact)
+
+    def test_tester_dispatches_gradle_from_build_file(
+        self, tmp_path, mock_tool_registry, permission_manager
+    ):
+        (tmp_path / "build.gradle.kts").write_text("plugins {}", encoding="utf-8")
+        mock_tool_registry.get.return_value.repo_root = tmp_path
+        tester = TesterAgent(mock_tool_registry, permission_manager)
+
+        tester.run("run tests")
+
+        mock_tool_registry.execute.assert_called_once_with(
+            name="run_tests",
+            tool_call_id="tester_gradle",
+            tool="gradle",
+            goals=["test"],
+        )

@@ -100,6 +100,12 @@ class EvidenceJudge:
             if len(part) >= 2 and part.lower() not in {"bug", "java", "code"}
         }
 
+        # Pure Chinese queries produce no code identifiers.  Return a
+        # mid-range confidence so the optional LLM judge gets a chance to
+        # evaluate, instead of always falling through to "degraded".
+        if not query_tokens:
+            return False, 0.5, "纯中文查询，无代码标识符，需 LLM 判断"
+
         # Check how many query tokens appear in results
         result_text = " ".join(
             f"{r.chunk.slice.class_name} {r.chunk.slice.method_name} {r.chunk.slice.content[:200]}"

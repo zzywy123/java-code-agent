@@ -56,10 +56,11 @@ class ListFilesTool(BaseTool):
 
         lines = []
         for entry in entries:
-            # Skip excluded directories
-            if entry.name.startswith(".") and entry.is_dir():
+            try:
+                entry = self.validate_path(str(entry))
+            except Exception:
                 continue
-            rel = entry.relative_to(self.repo_root)
+            rel = entry.relative_to(self.repo_root.resolve())
             prefix = "📁" if entry.is_dir() else "📄"
             lines.append(f"{prefix} {rel.as_posix()}")
 

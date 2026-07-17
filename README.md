@@ -8,15 +8,16 @@
 - `git diff`、`git status`、`git log` 等明确只读命令直接返回真实仓库输出，不经过 RAG 改写；操作台根据结构化渲染提示使用 Diff/Text 代码块，保留 `$`、`~`、缩进和换行。
 - Java 方法级索引、BM25 与可选向量混合检索。
 - Supervisor、Researcher、Coder、Tester、Verifier 协作。
-- Patch 前人工审批，仓库路径和命令安全限制。
-- SQLite Checkpoint、短期/摘要/长期记忆。
-- MCP stdio 工具调用。
+- Patch 前人工审批；批准后由 Tester 自动运行白名单测试，不重复审批。
+- Patch 使用 `git apply --check/apply/reverse`，构建目标走 Maven/Gradle 白名单并按构建文件自动识别。
+- SQLite Checkpoint、短期/摘要记忆；工作流成功结束后自动提取稳定决策并去重写入长期记忆，也支持显式写入。
+- MCP stdio 是 Researcher 的首选只读工具通道：启动时完成能力发现，搜索/Git 结果作为证据进入后续 Agent，失败时回退本地 ToolRegistry。
 - Trace、Token、工具成功率与可选成本统计。
 - CLI、Streamlit UI、隔离式评估和 Docker 部署。
 
 ## 本地启动
 
-要求 Python 3.11+、JDK 17、Maven 或目标仓库自带 Maven Wrapper。
+要求 Python 3.11+、JDK 17，以及 Maven/Gradle 或目标仓库自带对应 Wrapper。
 
 ```powershell
 cd "E:\code agent\java-coding-agent"
@@ -37,6 +38,14 @@ CLI：
 coding-agent
 ```
 
+工作流成功结束后会额外调用一次模型，只在识别到稳定的 preference、convention 或 decision 时写入长期记忆，并产生 `memory_saved` 事件。CLI 也可显式保存，例如：
+
+```text
+/remember convention java-style Java Service 使用构造器注入
+```
+
+自动提取器禁止保存代码事实、Bug 状态、测试结果和临时过程；这些信息每次都从当前仓库重新验证。可通过 `MEMORY_AUTO_CAPTURE_DECISIONS=false` 关闭自动提取。
+
 Streamlit 操作台：
 
 ```powershell
@@ -55,17 +64,21 @@ py -3.14 -m streamlit run src/agent/ui/app.py
 |---|---|
 | `PROVIDER` | `deepseek`、`openai` 或 `ollama` |
 | `AGENT_REPO_ROOT` | Agent 可访问的仓库根目录 |
-| `AGENT_REQUIRE_APPROVAL` | 写操作是否必须审批 |
+| `AGENT_REQUIRE_APPROVAL` | Patch 等写操作是否必须审批；主工作流批准 Patch 后自动测试 |
 | `RAG_ENABLE_VECTOR` | 是否启用向量检索；关闭后使用 BM25 |
+| `EMBEDDING_LOCAL_FILES_ONLY` | 本地 Embedding 是否只使用缓存；默认开启，避免首问访问 Hugging Face |
+| `EMBEDDING_HUB_TIMEOUT_SECONDS` | 允许在线下载模型时的 Hugging Face 超时秒数 |
 | `RAG_FORCE_REINDEX` | 是否强制重建索引 |
-| `MCP_ENABLED` | 是否启用 Researcher MCP stdio 路径 |
+| `MEMORY_AUTO_CAPTURE_DECISIONS` | 是否在工作流成功结束后自动沉淀稳定决策 |
+| `MEMORY_AUTO_CAPTURE_MAX_CHARS` | 决策提取时任务和结果各自的最大字符数 |
+| `MCP_ENABLED` | 是否让 Researcher 优先使用 MCP stdio 只读工具通道 |
 | `OBSERVABILITY_*` | Trace 目录和可选 Token 单价 |
 
 密钥只放在本地环境或 `.env`，不要提交。修改过真实密钥后应在供应商控制台轮换。
 
 ## 评估
 
-每个任务会复制 `demo-repo` 到独立临时 Git 仓库，执行固定 Bug 注入、Agent 流程、编译/测试和确定性断言，结束后清理副本。LLM Judge 默认关闭，只有显式注入 Judge LLM 才会产生评分。
+每个任务会复制 `demo-repo` 到独立临时 Git 仓库，执行固定 Bug 注入、Agent 流程、编译/测试和确定性断言，结束后清理副本。修改文件统计来自 `git status --porcelain`，包含未跟踪的新文件；报告代码版本取主 Agent 项目而非 Demo fixture。LLM Judge 默认关闭，只有显式注入 Judge LLM 才会产生评分。
 
 ```powershell
 py -3.14 -m agent.eval.runner --fixture demo-repo --output reports --runs 1

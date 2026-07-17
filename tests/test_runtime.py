@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from agent.config import AgentConfig, LLMConfig
+from agent.config import AgentConfig, EmbeddingConfig, LLMConfig, RAGConfig
 from agent import runtime as runtime_module
 
 
@@ -19,13 +19,14 @@ def test_create_app_runtime_wires_one_shared_service(monkeypatch, tmp_path: Path
         get_storage_dir=lambda: tmp_path / "sessions",
     )
     workflow = object()
+    workflow_args = {}
 
     monkeypatch.setattr(
         runtime_module,
         "load_config",
         lambda: (
             LLMConfig(provider="ollama"),
-            SimpleNamespace(repo_root=repo),
+            SimpleNamespace(repo_root=repo, require_approval=True),
             AgentConfig(),
         ),
     )
@@ -37,7 +38,11 @@ def test_create_app_runtime_wires_one_shared_service(monkeypatch, tmp_path: Path
     monkeypatch.setattr(runtime_module, "load_workflow_config", lambda: object())
     monkeypatch.setattr(runtime_module, "load_rag_config", lambda: object())
     monkeypatch.setattr(runtime_module, "build_mcp_adapter", lambda root: "mcp")
-    monkeypatch.setattr(runtime_module, "create_workflow", lambda **kwargs: workflow)
+    def create_workflow(**kwargs):
+        workflow_args.update(kwargs)
+        return workflow
+
+    monkeypatch.setattr(runtime_module, "create_workflow", create_workflow)
 
     app_runtime = runtime_module.create_app_runtime(repo)
 
@@ -48,8 +53,45 @@ def test_create_app_runtime_wires_one_shared_service(monkeypatch, tmp_path: Path
     assert app_runtime.search_type == "BM25"
     assert app_runtime.service._workflow is workflow
     assert app_runtime.service._sessions is session_manager
+    assert workflow_args["require_approval"] is True
 
 
 def test_create_app_runtime_rejects_missing_repository(tmp_path: Path):
     with pytest.raises(ValueError, match="does not exist"):
         runtime_module.create_app_runtime(tmp_path / "missing")
+
+
+def test_build_rag_index_degrades_to_bm25_when_local_model_is_unavailable(
+    monkeypatch, tmp_path: Path
+):
+    repo = tmp_path / "repo"
+    source_dir = repo / "src" / "main" / "java"
+    source_dir.mkdir(parents=True)
+    (source_dir / "OrderService.java").write_text(
+        "class OrderService { int total() { return 1; } }",
+        encoding="utf-8",
+    )
+    rag_config = RAGConfig(
+        enable_vector=True,
+        index_dir=str(tmp_path / "index"),
+        chroma_persist_dir=str(tmp_path / "chroma"),
+    )
+    monkeypatch.setattr(runtime_module, "load_rag_config", lambda: rag_config)
+    monkeypatch.setattr(
+        runtime_module,
+        "load_embedding_config",
+        lambda: EmbeddingConfig(local_files_only=True),
+    )
+
+    from agent.indexing.embedding import EmbeddingService
+
+    def fail_initialize(self):
+        raise RuntimeError("local model is unavailable")
+
+    monkeypatch.setattr(EmbeddingService, "initialize", fail_initialize)
+
+    engine, chunk_count = runtime_module.build_rag_index(repo)
+
+    assert engine._vector_store is None
+    assert chunk_count > 0
+    assert engine.search("OrderService")

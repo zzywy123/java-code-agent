@@ -11,6 +11,7 @@ import json
 import logging
 import os
 from pathlib import Path
+import time
 from typing import Any
 
 from mcp import ClientSession, StdioServerParameters
@@ -121,30 +122,72 @@ class MCPToolAdapter:
         self._client = client
         self._permissions = permission_manager
         self._role = role
+        self._available_tools: set[str] | None = None
+
+    def initialize_sync(self) -> set[str]:
+        """Perform MCP initialize/tools-list and cache server capabilities."""
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            tools = asyncio.run(self._client.list_tools())
+            self._available_tools = {str(tool.get("name")) for tool in tools}
+            return set(self._available_tools)
+        raise RuntimeError("同步MCP适配器不能在运行中的事件循环内初始化")
 
     async def call_tool(self, name: str, arguments: dict[str, Any]):
         from agent.models import ToolResult, ToolStatus
+        from agent.observability.tracer import observe_span, record_tool_metric
 
         self._permissions.assert_tool_allowed(self._role, name)
-        raw = await self._client.call_tool(name, arguments)
-        text = "\n".join(raw.get("content", []))
-        try:
-            payload = json.loads(text)
-            status = ToolStatus(payload.get("status", "execution_error"))
+        if self._available_tools is not None and name not in self._available_tools:
             return ToolResult(
                 tool_call_id=f"mcp_{name}",
                 name=name,
-                status=status,
-                output=payload.get("output", ""),
-                metadata=payload.get("metadata", {}),
+                status=ToolStatus.NOT_FOUND,
+                output=f"MCP Server 未声明工具: {name}",
             )
-        except (json.JSONDecodeError, ValueError):
-            return ToolResult(
-                tool_call_id=f"mcp_{name}",
-                name=name,
-                status=ToolStatus.EXECUTION_ERROR if raw.get("isError") else ToolStatus.SUCCESS,
-                output=text,
-            )
+
+        started = time.perf_counter()
+        with observe_span(f"mcp.{name}", {"transport": "stdio", "tool": name}) as span:
+            try:
+                raw = await self._client.call_tool(name, arguments)
+                text = "\n".join(raw.get("content", []))
+                try:
+                    payload = json.loads(text)
+                    status = ToolStatus(payload.get("status", "execution_error"))
+                    result = ToolResult(
+                        tool_call_id=f"mcp_{name}",
+                        name=name,
+                        status=status,
+                        output=payload.get("output", ""),
+                        metadata=payload.get("metadata", {}),
+                    )
+                except (json.JSONDecodeError, ValueError):
+                    result = ToolResult(
+                        tool_call_id=f"mcp_{name}",
+                        name=name,
+                        status=(
+                            ToolStatus.EXECUTION_ERROR
+                            if raw.get("isError")
+                            else ToolStatus.SUCCESS
+                        ),
+                        output=text,
+                    )
+            except Exception:
+                duration_ms = (time.perf_counter() - started) * 1000
+                record_tool_metric(f"mcp.{name}", "execution_error", duration_ms)
+                if span is not None:
+                    span.status = "error"
+                raise
+
+            duration_ms = (time.perf_counter() - started) * 1000
+            record_tool_metric(f"mcp.{name}", result.status.value, duration_ms)
+            if span is not None:
+                span.attributes["status"] = result.status.value
+                span.attributes["duration_ms"] = duration_ms
+                if result.status != ToolStatus.SUCCESS:
+                    span.status = "error"
+            return result
 
     def call_tool_sync(self, name: str, arguments: dict[str, Any]):
         try:

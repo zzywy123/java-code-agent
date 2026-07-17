@@ -2,8 +2,8 @@
 
 from pathlib import Path
 
-from agent import cli
 from agent.config import RAGConfig
+from agent import runtime
 
 
 def test_build_rag_index_reuses_persisted_bm25_cache(monkeypatch, tmp_path: Path):
@@ -25,11 +25,11 @@ public class OrderService {
         enable_vector=False,
         index_dir=str(tmp_path / "index"),
     )
-    monkeypatch.setattr(cli, "load_rag_config", lambda: config)
+    monkeypatch.setattr(runtime, "load_rag_config", lambda: config)
 
-    first_engine, first_count = cli.build_rag_index(repo)
+    first_engine, first_count = runtime.build_rag_index(repo)
     first_stats = first_engine.index_stats
-    second_engine, second_count = cli.build_rag_index(repo)
+    second_engine, second_count = runtime.build_rag_index(repo)
     second_stats = second_engine.index_stats
 
     assert first_count > 0

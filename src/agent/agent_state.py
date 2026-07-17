@@ -28,4 +28,5 @@ class AgentState(TypedDict):
     patches: list[PatchRecord]
     final_answer: str | None
     error: str | None
+    approval_rejected: NotRequired[bool]
     session_id: NotRequired[str]

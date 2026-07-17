@@ -8,7 +8,7 @@
 
 ## Phase 2
 
-状态：已完成模块实现；当前项目全量 356 个测试通过，2 个可选场景跳过。
+状态：已完成模块实现；当前项目全量 379 个测试通过，2 个可选场景跳过。
 
 索引、Hybrid Search、Agentic RAG、Memory、角色权限、Artifact 和官方 MCP SDK 已存在。本阶段此前主要以独立模块测试为主。
 
@@ -21,21 +21,28 @@
 - 父级 LangGraph 工作流：Supervisor → Researcher → Coder → Tester → Verifier。
 - Verifier 驳回后的 Coder 返工循环和最大返工次数。
 - SQLite 持久化 Checkpointer 和 SessionManager。
-- ShortTerm/Summary/LongTerm Memory 上下文注入；长期记忆只注入 preference/convention/decision。
-- Researcher 通过官方 MCP Python SDK 的 stdio Client 执行搜索，再进入 Agentic RAG。
+- ShortTerm/Summary/LongTerm Memory 上下文注入；成功工作流自动提取并去重沉淀稳定决策，AppService/CLI 显式入口继续保留。
+- Researcher 通过官方 MCP Python SDK 的 stdio Client 完成能力发现，搜索和 Git 只读工具优先经 MCP 调用，证据进入 Agentic RAG 后续上下文。
 - 角色受限 ToolRegistry，Coder、Tester、Verifier 不共享越权工具。
 - Demo Maven Wrapper 和已修复的 calculateTotal 示例。
 
 验证：
 
-- Python全量测试：`330 passed, 2 skipped in 36.39s`。
+- Python 全量测试：`379 passed, 2 skipped`。
 - Python静态编译：通过。
 - 真实 Patch + Maven Wrapper + Git Diff + Verifier 集成测试通过。
+- Patch 使用 `git apply --check/apply/reverse`，支持带上下文和零上下文 hunk，并保留内容哈希校验。
+- Maven/Gradle goal/task 使用结构化白名单；Tester 根据标准构建文件自动选择工具。
+- `search_code` 与 `list_files` 对每个结果执行统一路径保护，敏感文件不会返回给 Agent。
+- 本地 Embedding 启动时从缓存单次预热；并发请求不会重复加载，缓存缺失或初始化失败会立即降级 BM25。
+- 同一 Session 的新请求会清空任务级 Search/Test/Review Artifact 并创建新 Trace，避免复用旧审查结论。
+- Verifier 可在没有 CodeChangeArtifact 时直接审查真实工作区 Diff。
 - 真实 stdio MCP `initialize → tools/list → tools/call` 测试通过。
+- MCP 调用记录独立 Trace/指标，协议异常和未声明工具会回退本地只读 ToolRegistry。
 - SQLite Checkpoint 重启恢复测试通过。
 - Session 消息历史会保留 AI tool call 与 ToolMessage 的相邻关系；孤立工具结果降级为 SystemMessage，避免 OpenAI `role=tool` 协议错误。
 - 真实工具端到端测试固定注入故意 Bug，并直接校验补丁改变目标文件，避免 Git 行尾归一化导致假失败或假阳性。
-- CLI 已接入持久化增量索引：缓存代码块、文件哈希和 Chroma 向量；未修改文件不会重复生成 Embedding。
+- 共享 Runtime 已接入持久化增量索引：缓存代码块、文件哈希和 Chroma 向量；未修改文件不会重复生成 Embedding。
 - 支持 `RAG_ENABLE_VECTOR=false` 的 BM25-only 模式，以及 `RAG_FORCE_REINDEX=true` 的显式全量重建。
 - 明确写操作使用确定性意图保护，不能被 LLM 错误路由为只读问答。
 - Agentic RAG 会补充检索 `Class::method` 依赖，EvidenceJudge 使用标识符覆盖和排名，不再错误比较 RRF 绝对分数。
@@ -47,7 +54,10 @@
 状态：已完成。
 
 - `AppService` 提供 `create_session`、`list_sessions`、`submit`、`resume`、`get_session` 和 `stream_events`。
+- `AppService.remember_project_fact` 提供受类型限制的显式长期记忆写入闭环。
+- 自动沉淀产生持久化 `memory_saved` 事件，CLI 与 Streamlit 时间线均可查看，重复内容不会重复写入。
 - CLI 只调用 AppService，不再直接执行 LangGraph invoke/resume。
+- CLI 中重复的旧索引构建、旧单 Agent Runner 和旧 Multi-Agent 拼装代码已删除。
 - 父图与 Coder 子图的真实 LangGraph 更新映射为统一 `StreamEvent`。
 - 覆盖 Agent 切换、RAG、工具调用/结果、审批、Patch、测试、审查、返工、错误和完成事件。
 - 事件以 JSONL 持久化到 Checkpoint 目录，审批恢复按消息、tool call 和 interrupt ID 去重。
@@ -88,6 +98,7 @@
 - 固定 8 个问答、修复、测试生成、返工和安全任务。
 - 每个任务复制到独立临时 Git 仓库，setup hook 只修改副本。
 - 支持编译、测试、引用、修改范围、符号、返工与安全断言。
+- 修改范围通过 `git status --porcelain` 获取，包含未跟踪的新文件；代码版本记录主 Agent 项目。
 - Windows Git 对象只读属性会在清理时恢复，不静默遗留目录。
 - LLM Judge 默认关闭，报告不伪造模型能力数据。
 
@@ -102,7 +113,7 @@
 
 ## 最终验证
 
-- `py -3.14 -m pytest -q`：356 passed，2 skipped。
+- `py -3.14 -m pytest -q`：379 passed，2 skipped。
 - `py -3.14 -m compileall -q src tests`：通过。
 - `py -3.14 -m pip check`：无依赖冲突。
 - Compose YAML 解析、只读根文件系统、PID、capabilities 和 Docker Socket 安全断言：通过。

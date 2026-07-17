@@ -16,6 +16,7 @@ Key design decisions:
 from __future__ import annotations
 
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
@@ -47,6 +48,7 @@ def create_agent_graph(
     llm: Any | None = None,
     checkpointer: BaseCheckpointSaver | None | bool = None,
     context_provider: Callable[[AgentState], list[BaseMessage]] | None = None,
+    require_approval: bool = True,
 ) -> Any:
     """Create the LangGraph agent graph.
 
@@ -105,6 +107,12 @@ def create_agent_graph(
                     arguments=tc.get("args", {}),
                 ))
 
+        if any(_is_duplicate_patch(call, state.get("patches", []), repo_root) for call in pending):
+            response = AIMessage(
+                content="补丁已经成功应用，修改阶段结束，后续由 Tester 运行测试。"
+            )
+            pending = []
+
         return {
             "messages": [response],
             "pending_tool_calls": pending,
@@ -138,7 +146,7 @@ def create_agent_graph(
         Returns routing decision. Does NOT modify state.
         """
         pending = state.get("pending_tool_calls", [])
-        if needs_approval(pending):
+        if require_approval and needs_approval(pending):
             return "request_approval"
         return "tool_executor"
 
@@ -186,10 +194,12 @@ def create_agent_graph(
                 "messages": messages,
                 "pending_tool_calls": [],
                 "consecutive_failures": state["consecutive_failures"] + 1,
+                "approval_rejected": True,
+                "final_answer": "操作已被用户拒绝，未修改文件。",
             }
 
         # Approved - continue to tool_executor (empty update, flow continues)
-        return {}
+        return {"approval_rejected": False}
 
     # --- Tool Executor Node ---
     def tool_executor(state: AgentState) -> dict:
@@ -292,7 +302,11 @@ def create_agent_graph(
             "tool_executor": "tool_executor",
         },
     )
-    graph.add_edge("request_approval", "tool_executor")
+    graph.add_conditional_edges(
+        "request_approval",
+        lambda state: "end" if state.get("approval_rejected") else "execute",
+        {"end": "end_node", "execute": "tool_executor"},
+    )
     graph.add_edge("tool_executor", "agent")
     graph.add_edge("end_node", END)
 
@@ -300,3 +314,26 @@ def create_agent_graph(
     if checkpointer is None:
         checkpointer = MemorySaver()
     return graph.compile(checkpointer=checkpointer)
+
+
+def _is_duplicate_patch(
+    call: ToolCallRequest,
+    patches: list[PatchRecord],
+    repo_root: Any,
+) -> bool:
+    """Treat an identical patch for the same file as already completed."""
+    if call.name != "apply_patch":
+        return False
+    path = str(call.arguments.get("path") or "")
+    unified_diff = str(call.arguments.get("unified_diff") or "")
+    if not path or not unified_diff:
+        return False
+    try:
+        requested = (Path(repo_root).resolve() / path).resolve()
+        return any(
+            Path(patch.file_path).resolve() == requested
+            and patch.unified_diff == unified_diff
+            for patch in patches
+        )
+    except (OSError, RuntimeError):
+        return False

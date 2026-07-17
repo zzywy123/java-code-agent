@@ -8,6 +8,9 @@ from __future__ import annotations
 
 from pathlib import Path
 import os
+import re
+import shutil
+import subprocess
 from typing import Any
 
 from agent.models import ToolResult, ToolStatus
@@ -19,6 +22,80 @@ from agent.security.command_guard import (
 )
 from agent.security.sandbox import run_sandboxed
 from agent.tools.base import BaseTool
+
+
+def detect_build_tool(repo_root: Path) -> str | None:
+    """Detect the repository build tool from its standard build files."""
+    if (repo_root / "pom.xml").is_file():
+        return "maven"
+    if any((repo_root / name).is_file() for name in ("build.gradle", "build.gradle.kts")):
+        return "gradle"
+    return None
+
+
+def _resolve_build_executable(repo_root: Path, tool: str) -> str | None:
+    if tool == "maven":
+        wrapper = repo_root / ("mvnw.cmd" if os.name == "nt" else "mvnw")
+        if wrapper.is_file():
+            return str(wrapper.resolve())
+        executable = shutil.which("mvn")
+        if executable:
+            return executable
+        if os.name == "nt":
+            for candidate in (
+                Path(r"E:\maven\apache-maven-3.5.01\bin\mvn.cmd"),
+                Path(r"C:\Program Files\Maven\bin\mvn.cmd"),
+            ):
+                if candidate.is_file():
+                    return str(candidate)
+        return None
+
+    wrapper = repo_root / ("gradlew.bat" if os.name == "nt" else "gradlew")
+    if wrapper.is_file():
+        return str(wrapper.resolve())
+    return shutil.which("gradle")
+
+
+def _is_jdk_home(path: str | Path) -> bool:
+    home = Path(path)
+    javac_name = "javac.exe" if os.name == "nt" else "javac"
+    return (home / "bin" / javac_name).is_file()
+
+
+def _discover_java_home(environment: dict[str, str]) -> str | None:
+    """Find a real JDK, preferring explicit configuration and valid JAVA_HOME."""
+    for variable in ("AGENT_JAVA_HOME", "JAVA_HOME"):
+        candidate = environment.get(variable, "").strip()
+        if candidate and _is_jdk_home(candidate):
+            return str(Path(candidate).resolve())
+
+    javac = shutil.which("javac")
+    if not javac:
+        return None
+
+    try:
+        result = subprocess.run(
+            [javac, "-J-XshowSettings:properties", "-version"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=10,
+        )
+        settings = f"{result.stdout}\n{result.stderr}"
+        matches = re.findall(
+            r"^\s*(?:application\.home|java\.home)\s*=\s*(.+?)\s*$",
+            settings,
+            flags=re.MULTILINE,
+        )
+        for candidate in matches:
+            if _is_jdk_home(candidate):
+                return str(Path(candidate).resolve())
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+    inferred = Path(javac).resolve().parent.parent
+    return str(inferred) if _is_jdk_home(inferred) else None
 
 
 class RunTestsTool(BaseTool):
@@ -77,45 +154,40 @@ class RunTestsTool(BaseTool):
         if not goals:
             return self._error_result(tool_call_id, ToolStatus.INVALID_ARGUMENT, "必须指定构建目标 (goals)")
 
-        # Build argv through command_guard
+        # Build through the goal/task allowlist before resolving executables.
         try:
             if tool == "maven":
-                wrapper = self.repo_root / ("mvnw.cmd" if os.name == "nt" else "mvnw")
-                import shutil
-                mvn_path = str(wrapper) if wrapper.exists() else shutil.which("mvn")
-                if not mvn_path:
-                    # Try common Windows location
-                    for p in [r"E:\maven\apache-maven-3.5.01\bin\mvn.cmd",
-                              r"C:\Program Files\Maven\bin\mvn.cmd"]:
-                        if Path(p).exists():
-                            mvn_path = p
-                            break
-                if not mvn_path:
+                executable = _resolve_build_executable(self.repo_root, tool)
+                use_wrapper = bool(executable and Path(executable).resolve().parent == self.repo_root.resolve())
+                argv = build_maven_argv(
+                    goals,
+                    module=module,
+                    extra_args=extra_args,
+                    use_wrapper=use_wrapper,
+                )
+                if not executable:
                     return self._error_result(
                         tool_call_id,
                         ToolStatus.NOT_FOUND,
                         "找不到 mvn 命令，请确保 Maven 已安装并在 PATH 中",
                     )
-                argv = [mvn_path, "-B"] + goals
-                if module:
-                    argv.extend(["-pl", module])
-                if extra_args:
-                    argv.extend(extra_args)
+                argv[0] = executable
             elif tool == "gradle":
-                import shutil
-                wrapper = self.repo_root / ("gradlew.bat" if os.name == "nt" else "gradlew")
-                gradle_path = str(wrapper) if wrapper.exists() else shutil.which("gradle")
-                if not gradle_path:
+                executable = _resolve_build_executable(self.repo_root, tool)
+                use_wrapper = bool(executable and Path(executable).resolve().parent == self.repo_root.resolve())
+                argv = build_gradle_argv(
+                    goals,
+                    project_path=module,
+                    extra_args=extra_args,
+                    use_wrapper=use_wrapper,
+                )
+                if not executable:
                     return self._error_result(
                         tool_call_id,
                         ToolStatus.NOT_FOUND,
                         "找不到 gradle 命令，请确保 Gradle 已安装并在 PATH 中",
                     )
-                argv = [gradle_path, "--no-daemon", "--console=plain"] + goals
-                if module:
-                    argv.extend(["-p", module])
-                if extra_args:
-                    argv.extend(extra_args)
+                argv[0] = executable
             else:
                 return self._error_result(
                     tool_call_id,
@@ -132,11 +204,12 @@ class RunTestsTool(BaseTool):
 
         # Execute in sandbox
         child_env = os.environ.copy()
-        configured_java_home = child_env.pop("AGENT_JAVA_HOME", "")
-        if configured_java_home:
-            child_env["JAVA_HOME"] = configured_java_home
+        java_home = _discover_java_home(child_env)
+        child_env.pop("AGENT_JAVA_HOME", None)
+        if java_home:
+            child_env["JAVA_HOME"] = java_home
+            child_env["PATH"] = str(Path(java_home) / "bin") + os.pathsep + child_env.get("PATH", "")
         elif os.name == "nt":
-            # The host may expose a stale JAVA_HOME while java.exe on PATH is current.
             child_env.pop("JAVA_HOME", None)
         if tool == "maven":
             encoding_opts = (
@@ -158,6 +231,8 @@ class RunTestsTool(BaseTool):
         # Build output
         output_parts = []
         output_parts.append(f"命令: {' '.join(argv)}")
+        if java_home:
+            output_parts.append(f"JDK: {java_home}")
         output_parts.append(f"退出码: {result.return_code}")
         output_parts.append(f"耗时: {result.duration_seconds}秒")
 
@@ -189,5 +264,6 @@ class RunTestsTool(BaseTool):
                 "timed_out": result.timed_out,
                 "duration": result.duration_seconds,
                 "truncated": result.truncated,
+                "java_home": java_home,
             },
         )

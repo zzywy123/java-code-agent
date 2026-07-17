@@ -64,6 +64,9 @@ class SupervisorAgent:
         if explicit_route is not None:
             return explicit_route
 
+        if self._looks_like_question(task):
+            return AgentRole.RESEARCHER
+
         if not self._llm:
             return self._rule_based_route(task)
 
@@ -191,3 +194,14 @@ class SupervisorAgent:
             return AgentRole.TESTER
 
         return None
+
+    @staticmethod
+    def _looks_like_question(task: str) -> bool:
+        normalized = f" {task.strip().lower()} "
+        return any(
+            marker in normalized
+            for marker in (
+                "为什么", "怎么", "如何", "是什么", "哪里", "是否", "吗",
+                "？", "?", " why ", " how ", " what ", " explain ",
+            )
+        )

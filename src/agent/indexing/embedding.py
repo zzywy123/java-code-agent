@@ -11,6 +11,8 @@ The OpenAI provider requires OPENAI_API_KEY environment variable.
 from __future__ import annotations
 
 import logging
+import os
+import threading
 from typing import Any
 
 from agent.config import EmbeddingConfig, EmbeddingProvider
@@ -29,27 +31,54 @@ class EmbeddingService:
         self._model: Any = None
         self._openai_client: Any = None
         self._initialized = False
+        self._initialization_error: RuntimeError | None = None
+        self._initialization_lock = threading.Lock()
+
+    def initialize(self) -> None:
+        """Initialize exactly once so concurrent queries cannot duplicate model loading."""
+        self._ensure_initialized()
 
     def _ensure_initialized(self) -> None:
         """Lazy initialization of the embedding model."""
         if self._initialized:
             return
+        if self._initialization_error is not None:
+            raise self._initialization_error
 
-        if self._config.provider == EmbeddingProvider.LOCAL:
-            self._init_local()
-        elif self._config.provider == EmbeddingProvider.OPENAI:
-            self._init_openai()
-        else:
-            raise ValueError(f"Unknown embedding provider: {self._config.provider}")
-
-        self._initialized = True
+        with self._initialization_lock:
+            if self._initialized:
+                return
+            if self._initialization_error is not None:
+                raise self._initialization_error
+            try:
+                if self._config.provider == EmbeddingProvider.LOCAL:
+                    self._init_local()
+                elif self._config.provider == EmbeddingProvider.OPENAI:
+                    self._init_openai()
+                else:
+                    raise ValueError(f"Unknown embedding provider: {self._config.provider}")
+            except Exception as exc:
+                error = (
+                    exc if isinstance(exc, RuntimeError)
+                    else RuntimeError(f"Failed to initialize embedding service: {exc}")
+                )
+                self._initialization_error = error
+                raise error from exc
+            self._initialized = True
 
     def _init_local(self) -> None:
         """Initialize sentence-transformers model."""
         try:
+            if not self._config.local_files_only:
+                timeout = str(self._config.hub_timeout_seconds)
+                os.environ.setdefault("HF_HUB_ETAG_TIMEOUT", timeout)
+                os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", timeout)
             from sentence_transformers import SentenceTransformer
             logger.info("Loading embedding model: %s", self._config.model_name)
-            self._model = SentenceTransformer(self._config.model_name)
+            self._model = SentenceTransformer(
+                self._config.model_name,
+                local_files_only=self._config.local_files_only,
+            )
             # bge-small-zh-v1.5 outputs 512-dim vectors
             try:
                 actual_dim = self._model.get_embedding_dimension()
@@ -67,7 +96,6 @@ class EmbeddingService:
     def _init_openai(self) -> None:
         """Initialize OpenAI embedding client."""
         try:
-            import os
             from openai import OpenAI
             api_key = os.environ.get("OPENAI_API_KEY", "")
             if not api_key:

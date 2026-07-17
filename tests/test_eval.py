@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import subprocess
 from types import SimpleNamespace
 
 from agent.eval.assertions import evaluate_assertions, validate_citations
@@ -13,7 +14,7 @@ from agent.eval.report import (
     build_summary,
     write_report,
 )
-from agent.eval.runner import EvalTaskRunner, _apply_setup
+from agent.eval.runner import EvalTaskRunner, _apply_setup, _modified_files
 from agent.eval.task_set import EvalTask
 from agent.models import StreamEvent, SubmitResult
 
@@ -111,6 +112,25 @@ def test_setup_injects_bug_only_in_evaluation_copy(tmp_path: Path):
     copy_text = next(copy.rglob("OrderService.java")).read_text(encoding="utf-8")
     assert "getSubtotal" in fixture_text
     assert "getUnitPrice" in copy_text
+
+
+def test_modified_files_include_untracked_files(tmp_path: Path):
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    tracked = tmp_path / "Tracked.java"
+    tracked.write_text("class Tracked {}\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+    subprocess.run(
+        [
+            "git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+            "commit", "-qm", "baseline",
+        ],
+        cwd=tmp_path,
+        check=True,
+    )
+    tracked.write_text("class Tracked { int value; }\n", encoding="utf-8")
+    (tmp_path / "NewTest.java").write_text("class NewTest {}\n", encoding="utf-8")
+
+    assert _modified_files(tmp_path) == ["NewTest.java", "Tracked.java"]
 
 
 def test_citations_and_deterministic_assertions(tmp_path: Path):

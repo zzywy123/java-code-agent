@@ -69,10 +69,18 @@ class AgenticRAG:
             with observe_span("rag.round", {"round": round_num + 1}) as round_span:
                 # Step 1: Generate queries
                 if round_num == 0:
+                    # Most code questions already contain a searchable symbol.
+                    # Try it directly before spending a model call on rewriting.
+                    queries = [query]
+                elif round_num == 1:
                     queries = self._rewriter.rewrite(query)
                 else:
                     refinement = self._build_refinement_query(query, all_results)
                     queries = [refinement]
+
+                queries = [item for item in queries if item not in all_queries]
+                if not queries:
+                    queries = [self._build_refinement_query(query, all_results)]
 
                 all_queries.extend(queries)
 

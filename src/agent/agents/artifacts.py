@@ -31,6 +31,7 @@ class ArtifactFactory:
         results: list[Any] | None = None,
         analysis: str = "",
         relevant_files: list[str] | None = None,
+        tool_evidence: list[str] | None = None,
         direct_answer: str | None = None,
         render_hint: Literal["diff", "text"] | None = None,
     ) -> SearchArtifact:
@@ -40,6 +41,7 @@ class ArtifactFactory:
             results=results or [],
             analysis=analysis,
             relevant_files=relevant_files or [],
+            tool_evidence=tool_evidence or [],
             direct_answer=direct_answer,
             render_hint=render_hint,
         )

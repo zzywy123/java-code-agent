@@ -147,6 +147,10 @@ class SearchArtifact(BaseModel):
     results: list[SearchResult] = Field(default_factory=list)
     analysis: str = Field(default="", description="Researcher's analysis of the results")
     relevant_files: list[str] = Field(default_factory=list, description="File paths deemed relevant")
+    tool_evidence: list[str] = Field(
+        default_factory=list,
+        description="Validated read-only tool output forwarded to downstream agents",
+    )
     direct_answer: str | None = Field(
         default=None,
         description="Verbatim read-only tool result that bypasses RAG answer generation",
@@ -206,6 +210,7 @@ StreamEventType = Literal[
     "patch_applied",
     "test_result",
     "review_result",
+    "memory_saved",
     "rework",
     "token_usage",
     "error",

@@ -3,6 +3,7 @@
 from pathlib import Path
 
 import pytest
+from langchain_core.messages import AIMessage
 
 from agent.app_service import AppService
 from agent.config import AgentConfig, LLMConfig, MemoryConfig, RAGConfig, WorkflowConfig
@@ -10,6 +11,28 @@ from agent.models import ApprovalDecision
 from agent.session import SessionManager
 from agent.workflow import create_workflow
 from tests.test_workflow import AlreadyFixedLLM, EmptySearch, ScriptedLLM, build_registry
+
+
+class MemoryCapturingLLM(AlreadyFixedLLM):
+    def invoke(self, messages):
+        text = "\n".join(str(message.content) for message in messages)
+        if "项目长期记忆提取器" in text:
+            return AIMessage(content=(
+                '{"save":true,"type":"convention",'
+                '"content":"Java Service 统一使用构造器注入"}'
+            ))
+        return super().invoke(messages)
+
+
+class PatchMemoryCapturingLLM(ScriptedLLM):
+    def invoke(self, messages):
+        text = "\n".join(str(message.content) for message in messages)
+        if "项目长期记忆提取器" in text:
+            return AIMessage(content=(
+                '{"save":true,"type":"decision",'
+                '"content":"被拒绝的修改不应进入长期记忆"}'
+            ))
+        return super().invoke(messages)
 
 
 def build_service(tmp_path: Path, llm=None) -> tuple[AppService, SessionManager, MemoryConfig]:
@@ -223,4 +246,56 @@ def test_metrics_can_filter_current_session_and_project(tmp_path):
         service.get_metrics(scope="session")
     with pytest.raises(ValueError, match="未知指标范围"):
         service.get_metrics(scope="invalid")
+    service.close()
+
+
+def test_explicit_project_memory_write_persists(tmp_path):
+    service, manager, _ = build_service(tmp_path, AlreadyFixedLLM())
+
+    service.remember_project_fact(
+        "java-style",
+        "convention",
+        "Java service methods use constructor injection",
+    )
+
+    assert manager.long_term.recall("java-style") == {
+        "type": "convention",
+        "content": "Java service methods use constructor injection",
+    }
+    with pytest.raises(ValueError, match="记忆类型"):
+        service.remember_project_fact("bad", "code_fact", "stale fact")
+    service.close()
+
+
+def test_completed_decision_workflow_emits_automatic_memory_event(tmp_path):
+    service, manager, _ = build_service(tmp_path, MemoryCapturingLLM())
+    session_id = service.create_session("memory")
+
+    result = service.submit(
+        session_id,
+        "请采用构造器注入约定修改 OrderService，并运行测试",
+    )
+
+    event_types = [event.event_type for event in result.events]
+    assert "memory_saved" in event_types
+    assert event_types[-1] == "done"
+    memories = manager.long_term.list_all()
+    assert len(memories) == 1
+    assert memories[0]["content"]["source"] == "workflow"
+    service.close()
+
+
+def test_rejected_workflow_does_not_capture_memory(tmp_path):
+    service, manager, _ = build_service(tmp_path, PatchMemoryCapturingLLM())
+    session_id = service.create_session("rejected memory")
+    interrupted = service.submit(session_id, "请修复 calculateTotal，并运行测试")
+
+    result = service.resume(
+        session_id,
+        ApprovalDecision(approved=False, reason="不接受该方案"),
+    )
+
+    assert interrupted.needs_approval is True
+    assert "memory_saved" not in [event.event_type for event in result.events]
+    assert manager.long_term.count() == 0
     service.close()

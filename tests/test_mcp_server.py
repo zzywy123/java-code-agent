@@ -9,11 +9,12 @@ Validates:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -182,6 +183,19 @@ class TestMCPErrorMapping:
         server = CodingAgentMCPServer(mock_registry, permission_manager)
         result = await server._handle_tool_call("search_code", {"query": "x"})
         assert payload(result)["status"] == "execution_error"
+
+
+def test_adapter_caches_discovered_capabilities_and_rejects_unknown_tool():
+    client = MagicMock()
+    client.list_tools = AsyncMock(return_value=[{"name": "search_code"}])
+    client.call_tool = AsyncMock()
+    adapter = MCPToolAdapter(client, PermissionManager(), AgentRole.RESEARCHER)
+
+    assert adapter.initialize_sync() == {"search_code"}
+    result = asyncio.run(adapter.call_tool("git_status", {}))
+
+    assert result.status == ToolStatus.NOT_FOUND
+    client.call_tool.assert_not_awaited()
 
 
 @pytest.mark.asyncio

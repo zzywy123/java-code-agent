@@ -64,10 +64,7 @@ class EvalTaskRunner:
                 trace = runtime.service.get_trace(session_id)
 
             diff = _git(workspace, "diff")
-            modified_files = [
-                line.strip() for line in _git(workspace, "diff", "--name-only").splitlines()
-                if line.strip()
-            ]
+            modified_files = _modified_files(workspace)
             needs_build = any(
                 name in task.assertions for name in ("compile", "tests")
             )
@@ -136,7 +133,7 @@ def run_evaluation(
     report = EvalReport(
         model=llm_config.model,
         prompt_version="v0.2.0",
-        code_version=_git_code_version(fixture_dir),
+        code_version=_git_code_version(Path(__file__).resolve().parents[3]),
         temperature=llm_config.temperature,
         run_count=run_count,
         results=results,
@@ -257,9 +254,30 @@ def _count_spans(span: Any, name: str) -> int:
 
 def _git_code_version(path: Path) -> str:
     try:
-        return _git(path, "rev-parse", "--short", "HEAD").strip()
+        version = _git(path, "rev-parse", "--short", "HEAD").strip()
+        dirty = bool(_git(path, "status", "--porcelain").strip())
+        return f"{version}-dirty" if dirty else version
     except Exception:
         return "workspace"
+
+
+def _modified_files(workspace: Path) -> list[str]:
+    """Return tracked and untracked working-tree paths from porcelain status."""
+    paths: set[str] = set()
+    for line in _git(
+        workspace,
+        "status",
+        "--porcelain=v1",
+        "--untracked-files=all",
+    ).splitlines():
+        if len(line) < 4:
+            continue
+        path = line[3:]
+        if " -> " in path:
+            path = path.rsplit(" -> ", 1)[1]
+        if path:
+            paths.add(path.strip('"'))
+    return sorted(paths)
 
 
 def _remove_readonly(function: Callable[[str], Any], path: str, _error: Any) -> None:
