@@ -1,0 +1,22 @@
+# Local configuration and secrets
+.env
+
+# Agent runtime state and generated indexes
+.agent-index/
+.chroma/
+.checkpoints/
+.memory/
+.observability/
+reports/
+
+# Python tooling
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+
+# Build output and local IDE files
+dist/
+build/
+.idea/
+.vscode/

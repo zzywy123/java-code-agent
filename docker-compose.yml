@@ -1,0 +1,60 @@
+services:
+  agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      PROVIDER: ${PROVIDER:-ollama}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
+      DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-chat}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434/v1}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5-coder:7b}
+      AGENT_REPO_ROOT: /home/agent/workspace
+      RAG_ENABLE_VECTOR: ${RAG_ENABLE_VECTOR:-false}
+      RAG_INDEX_DIR: /home/agent/data/index
+      MEMORY_CHECKPOINT_DIR: /home/agent/data/checkpoints
+      MEMORY_LONG_TERM_PERSIST_DIR: /home/agent/data/memory
+      OBSERVABILITY_TRACE_DIR: /home/agent/data/observability/traces
+      MCP_ENABLED: ${MCP_ENABLED:-true}
+    ports:
+      - "${AGENT_UI_PORT:-8501}:8501"
+    volumes:
+      - type: bind
+        source: ${AGENT_WORKSPACE:-./demo-repo}
+        target: /home/agent/workspace
+      - agent-index-cache:/home/agent/data/index
+      - agent-checkpoints:/home/agent/data/checkpoints
+      - agent-memory:/home/agent/data/memory
+      - agent-observability:/home/agent/data/observability
+      - agent-model-cache:/home/agent/.cache/huggingface
+      - agent-maven-cache:/home/agent/.m2
+    read_only: true
+    tmpfs:
+      - /tmp:size=512m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    cpus: 2.0
+    mem_limit: 4g
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 4G
+        reservations:
+          cpus: "0.5"
+          memory: 1G
+
+volumes:
+  agent-index-cache:
+  agent-checkpoints:
+  agent-memory:
+  agent-observability:
+  agent-model-cache:
+  agent-maven-cache:

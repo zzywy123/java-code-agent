@@ -1,0 +1,13 @@
+.env
+.git
+.pytest_cache
+__pycache__
+*.pyc
+*.egg-info
+.agent-index
+.chroma
+.checkpoints
+.memory
+.observability
+reports
+demo-repo/target
