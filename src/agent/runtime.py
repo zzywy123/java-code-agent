@@ -52,6 +52,7 @@ def create_app_runtime(
     *,
     llm_config: LLMConfig | None = None,
     agent_config: AgentConfig | None = None,
+    storage_namespace: str | None = None,
 ) -> AppRuntime:
     """Construct one fully wired application runtime."""
     loaded_llm, security_config, loaded_agent = load_config()
@@ -75,7 +76,18 @@ def create_app_runtime(
     )
 
     llm = create_llm(llm_config)
-    session_manager = SessionManager(load_memory_config(), llm=llm)
+    memory_config = load_memory_config()
+    if storage_namespace:
+        namespace = hashlib.sha256(
+            f"{storage_namespace}:{resolved_repo}".casefold().encode("utf-8")
+        ).hexdigest()[:20]
+        memory_config = memory_config.model_copy(update={
+            "checkpoint_dir": str(Path(memory_config.checkpoint_dir) / namespace),
+            "long_term_persist_dir": str(
+                Path(memory_config.long_term_persist_dir) / namespace
+            ),
+        })
+    session_manager = SessionManager(memory_config, llm=llm)
     session_id = session_manager.get_or_create_active_session()
     try:
         mcp_adapter = build_mcp_adapter(resolved_repo)

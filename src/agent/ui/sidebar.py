@@ -3,26 +3,27 @@
 from __future__ import annotations
 
 from html import escape
-from pathlib import Path
 from typing import Any
 
 import streamlit as st
 
+from agent.repository_import import RepositoryImportError, RepositoryImportService
 
-def render_sidebar(runtime: Any, current_session_id: str) -> tuple[str, str | None]:
+
+def render_sidebar(
+    runtime: Any,
+    current_session_id: str,
+    import_service: RepositoryImportService,
+    owner_id: str,
+) -> tuple[str, str | None]:
     service = runtime.service
     with st.sidebar:
         st.subheader("工作区")
-        repo_value = st.text_input("仓库路径", value=str(runtime.repo_root))
-        repo_action = None
-        if st.button("加载仓库", use_container_width=True):
-            resolved = Path(repo_value).expanduser().resolve()
-            if not resolved.is_dir():
-                st.error("仓库目录不存在")
-            elif not any(resolved.rglob("*.java")):
-                st.error("目录中没有 Java 源文件")
-            else:
-                repo_action = str(resolved)
+        repo_action = _render_repository_import(
+            runtime,
+            import_service,
+            owner_id,
+        )
 
         st.markdown(
             f'<div class="repo-meta">{escape(runtime.llm_config.provider.value)} / '
@@ -44,11 +45,11 @@ def render_sidebar(runtime: Any, current_session_id: str) -> tuple[str, str | No
             format_func=lambda value: _session_label(value, summaries),
             label_visibility="collapsed",
         )
-        if st.button("新建会话", use_container_width=True):
+        if st.button("新建会话", width="stretch", icon=":material/add_comment:"):
             selected = service.create_session("Coding session")
 
         confirm_key = f"confirm_delete_session_{selected}"
-        if st.button("删除会话", use_container_width=True):
+        if st.button("删除会话", width="stretch", icon=":material/delete:"):
             st.session_state[confirm_key] = True
         if st.session_state.get(confirm_key):
             st.warning("将永久删除该会话的消息、事件、Checkpoint 和 Trace。")
@@ -56,7 +57,7 @@ def render_sidebar(runtime: Any, current_session_id: str) -> tuple[str, str | No
             if confirm_col.button(
                 "确认删除",
                 type="primary",
-                use_container_width=True,
+                width="stretch",
                 key=f"delete_session_{selected}",
             ):
                 replacement = service.delete_session(selected)
@@ -65,7 +66,7 @@ def render_sidebar(runtime: Any, current_session_id: str) -> tuple[str, str | No
                 st.rerun()
             if cancel_col.button(
                 "取消",
-                use_container_width=True,
+                width="stretch",
                 key=f"cancel_delete_session_{selected}",
             ):
                 st.session_state.pop(confirm_key, None)
@@ -117,6 +118,80 @@ def render_sidebar(runtime: Any, current_session_id: str) -> tuple[str, str | No
         right.metric("失败", metrics.tool_failures)
 
     return selected, repo_action
+
+
+def _render_repository_import(
+    runtime: Any,
+    import_service: RepositoryImportService,
+    owner_id: str,
+) -> str | None:
+    mode = st.segmented_control(
+        "导入方式",
+        ("本地文件夹", "Git 地址", "服务器路径"),
+        default="本地文件夹",
+        width="stretch",
+    )
+    try:
+        if mode == "本地文件夹":
+            uploaded_files = st.file_uploader(
+                "选择本地仓库",
+                accept_multiple_files="directory",
+                max_upload_size=25,
+                key="local_repository_upload",
+            )
+            if st.button(
+                "导入本地仓库",
+                width="stretch",
+                icon=":material/folder_open:",
+                disabled=not uploaded_files,
+            ):
+                with st.spinner("正在导入仓库"):
+                    result = import_service.import_uploaded_directory(
+                        uploaded_files,
+                        owner_id=owner_id,
+                    )
+                st.toast("本地仓库已导入", icon=":material/check_circle:")
+                return str(result.repo_root)
+
+        elif mode == "Git 地址":
+            git_url = st.text_input(
+                "Git 仓库地址",
+                placeholder="https://github.com/org/repository.git",
+            )
+            branch = st.text_input("分支", placeholder="main")
+            if st.button(
+                "克隆仓库",
+                width="stretch",
+                icon=":material/download:",
+                disabled=not git_url.strip(),
+            ):
+                with st.spinner("正在克隆仓库"):
+                    result = import_service.clone_repository(
+                        git_url,
+                        owner_id=owner_id,
+                        branch=branch,
+                    )
+                st.toast("Git 仓库已克隆", icon=":material/check_circle:")
+                return str(result.repo_root)
+
+        else:
+            repo_value = st.text_input(
+                "服务器仓库路径",
+                value=str(runtime.repo_root),
+                key=f"server_repo_path_{hash(str(runtime.repo_root))}",
+            )
+            if st.button(
+                "加载服务器仓库",
+                width="stretch",
+                icon=":material/folder_managed:",
+            ):
+                result = import_service.validate_server_repository(repo_value)
+                return str(result.repo_root)
+    except RepositoryImportError as exc:
+        st.error(str(exc))
+    except (OSError, ValueError) as exc:
+        st.error(f"仓库导入失败：{exc}")
+    return None
 
 
 def _session_label(session_id: str, summaries: list[Any]) -> str:

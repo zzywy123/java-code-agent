@@ -52,7 +52,13 @@ Streamlit 操作台：
 py -3.14 -m streamlit run src/agent/ui/app.py
 ```
 
-打开 `http://localhost:8501`。页面可切换仓库，新建、切换或删除 Session，查看 Agent 时间线、Diff、测试、Token、Trace，并处理 Patch 审批。删除操作需要二次确认，并同步清理消息状态、事件、Checkpoint 和 Trace。
+打开 `http://localhost:8501`。页面支持三种仓库导入方式：
+
+- “本地文件夹”会打开浏览器的目录选择器并上传目录内容。浏览器不会把客户端真实路径交给服务器，上传时会忽略 `.git`、构建产物和密钥文件，再由服务器创建一份 Git 基线。
+- “Git 地址”会从允许的 HTTPS 代码托管平台浅克隆公开仓库，也可指定分支。
+- “服务器路径”保留原有路径输入，只允许访问 `AGENT_SERVER_PATH_ROOTS` 配置的目录。
+
+导入后可新建、切换或删除 Session，查看 Agent 时间线、Diff、测试、Token、Trace，并处理 Patch 审批。不同浏览器会话使用隔离的上传目录、Checkpoint 和长期记忆。删除操作需要二次确认，并同步清理消息状态、事件、Checkpoint 和 Trace。
 
 左侧运行指标可以选择“当前会话”“当前项目”或“全部”。项目范围使用仓库绝对路径的稳定标识筛选；升级前没有项目标识的旧 Trace 仍计入全部和对应会话，但不会被猜测归入某个项目。
 
@@ -64,6 +70,10 @@ py -3.14 -m streamlit run src/agent/ui/app.py
 |---|---|
 | `PROVIDER` | `deepseek`、`openai` 或 `ollama` |
 | `AGENT_REPO_ROOT` | Agent 可访问的仓库根目录 |
+| `AGENT_WORKSPACE_ROOT` | 浏览器上传和 Git 克隆仓库的服务端持久化目录 |
+| `AGENT_SERVER_PATH_ROOTS` | “服务器路径”允许访问的根目录，按操作系统路径分隔符分隔 |
+| `AGENT_GIT_ALLOWED_HOSTS` | Git HTTPS 克隆主机白名单，逗号分隔 |
+| `AGENT_UPLOAD_MAX_FILES` / `AGENT_UPLOAD_MAX_MB` | 单次导入的有效文件数与总容量限制 |
 | `AGENT_REQUIRE_APPROVAL` | Patch 等写操作是否必须审批；主工作流批准 Patch 后自动测试 |
 | `RAG_ENABLE_VECTOR` | 是否启用向量检索；关闭后使用 BM25 |
 | `EMBEDDING_LOCAL_FILES_ONLY` | 本地 Embedding 是否只使用缓存；默认开启，避免首问访问 Hugging Face |
@@ -88,7 +98,7 @@ py -3.14 -m agent.eval.runner --fixture demo-repo --output reports --runs 1
 
 ## Docker
 
-Docker Compose 默认启动 Streamlit，工作区可写，其余根文件系统只读；容器以非 root 用户运行，移除 Linux capabilities，不挂载 Docker Socket，并设置 CPU、内存和进程限制。
+Docker Compose 默认启动 Streamlit，初始仓库和上传工作区可写，其余根文件系统只读；上传仓库保存在独立的 `agent-workspaces` 卷。容器以非 root 用户运行，移除 Linux capabilities，不挂载 Docker Socket，并设置 CPU、内存和进程限制。
 
 ```powershell
 $env:AGENT_WORKSPACE = "E:/my-java-repo"
@@ -102,6 +112,8 @@ docker run --rm -it -v D:/my-java-repo:/home/agent/workspace java-coding-agent c
 ```
 
 Ollama 在宿主机运行时，Compose 使用 `host.docker.internal` 访问。Linux 上需要按 Docker 环境补充 host gateway 或改为可访问的 Ollama 地址。
+
+公网部署仍应放在登录鉴权之后。Maven/Gradle 构建脚本属于仓库代码，执行测试时虽然会清除 API Key、Token、Secret 和 Password 类环境变量，并受到容器资源限制，但单个共享容器不等同于强多租户沙箱；不要把该部署方式直接开放给不受信任的匿名用户。
 
 ## 验证
 

@@ -14,6 +14,11 @@ services:
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434/v1}
       OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5-coder:7b}
       AGENT_REPO_ROOT: /home/agent/workspace
+      AGENT_WORKSPACE_ROOT: /home/agent/data/workspaces
+      AGENT_SERVER_PATH_ROOTS: /home/agent/workspace:/home/agent/data/workspaces
+      AGENT_GIT_ALLOWED_HOSTS: ${AGENT_GIT_ALLOWED_HOSTS:-github.com,gitee.com,gitlab.com}
+      AGENT_UPLOAD_MAX_FILES: ${AGENT_UPLOAD_MAX_FILES:-3000}
+      AGENT_UPLOAD_MAX_MB: ${AGENT_UPLOAD_MAX_MB:-100}
       RAG_ENABLE_VECTOR: ${RAG_ENABLE_VECTOR:-false}
       RAG_INDEX_DIR: /home/agent/data/index
       MEMORY_CHECKPOINT_DIR: /home/agent/data/checkpoints
@@ -30,6 +35,7 @@ services:
       - agent-checkpoints:/home/agent/data/checkpoints
       - agent-memory:/home/agent/data/memory
       - agent-observability:/home/agent/data/observability
+      - agent-workspaces:/home/agent/data/workspaces
       - agent-model-cache:/home/agent/.cache/huggingface
       - agent-maven-cache:/home/agent/.m2
     read_only: true
@@ -56,5 +62,6 @@ volumes:
   agent-checkpoints:
   agent-memory:
   agent-observability:
+  agent-workspaces:
   agent-model-cache:
   agent-maven-cache:

@@ -50,6 +50,19 @@ def test_session_delete_requires_explicit_confirmation():
     )
 
 
+def test_default_repository_uses_legacy_session_storage(monkeypatch, tmp_path: Path):
+    from agent.ui.app import _storage_namespace_for
+
+    default_repo = tmp_path / "default"
+    imported_repo = tmp_path / "imported"
+    default_repo.mkdir()
+    imported_repo.mkdir()
+    monkeypatch.setenv("AGENT_REPO_ROOT", str(default_repo))
+
+    assert _storage_namespace_for(default_repo, "browser-1") is None
+    assert _storage_namespace_for(imported_repo, "browser-1") == "browser-1"
+
+
 def test_streamlit_app_starts_with_mocked_runtime(monkeypatch, tmp_path: Path):
     pytest.importorskip("streamlit")
     from streamlit.testing.v1 import AppTest
@@ -106,10 +119,16 @@ def test_streamlit_app_starts_with_mocked_runtime(monkeypatch, tmp_path: Path):
         search_type="BM25",
         chunk_count=0,
     )
-    monkeypatch.setattr(runtime_module, "create_app_runtime", lambda root: fake_runtime)
+    monkeypatch.setattr(
+        runtime_module,
+        "create_app_runtime",
+        lambda root, storage_namespace=None: fake_runtime,
+    )
 
     app_path = UI_DIR / "app.py"
     monkeypatch.setenv("AGENT_REPO_ROOT", str(tmp_path))
+    monkeypatch.setenv("AGENT_WORKSPACE_ROOT", str(tmp_path / "uploads"))
+    monkeypatch.setenv("AGENT_SERVER_PATH_ROOTS", str(tmp_path))
     app = AppTest.from_file(str(app_path), default_timeout=10)
 
     app.run()

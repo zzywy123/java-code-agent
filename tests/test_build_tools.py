@@ -7,7 +7,12 @@ from pathlib import Path
 import pytest
 
 from agent.models import ToolStatus
-from agent.tools.build_tools import RunTestsTool, _discover_java_home, detect_build_tool
+from agent.tools.build_tools import (
+    RunTestsTool,
+    _discover_java_home,
+    _remove_secrets,
+    detect_build_tool,
+)
 
 
 class TestRunTestsTool:
@@ -98,3 +103,22 @@ def test_discover_java_home_ignores_jre_and_uses_javac_runtime(tmp_path, monkeyp
     result = _discover_java_home({"JAVA_HOME": str(jre)})
 
     assert result == str(jdk.resolve())
+
+
+def test_remove_secrets_keeps_build_configuration():
+    environment = {
+        "DEEPSEEK_API_KEY": "secret",
+        "GITHUB_TOKEN": "secret",
+        "DATABASE_PASSWORD": "secret",
+        "PATH": "bin",
+        "JAVA_HOME": "jdk",
+        "MAVEN_OPTS": "-Xmx1g",
+    }
+
+    _remove_secrets(environment)
+
+    assert environment == {
+        "PATH": "bin",
+        "JAVA_HOME": "jdk",
+        "MAVEN_OPTS": "-Xmx1g",
+    }

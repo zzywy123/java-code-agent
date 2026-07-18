@@ -23,7 +23,8 @@ RUN apt-get update \
     && useradd --system --gid agent --home-dir /home/agent --create-home agent \
     && mkdir -p /home/agent/workspace /home/agent/data/index \
         /home/agent/data/checkpoints /home/agent/data/memory \
-        /home/agent/data/observability /home/agent/.cache/huggingface \
+        /home/agent/data/observability /home/agent/data/workspaces \
+        /home/agent/.cache/huggingface \
         /home/agent/.m2 /opt/agent \
     && chown -R agent:agent /home/agent /opt/agent
 
@@ -35,4 +36,4 @@ USER agent
 WORKDIR /home/agent/workspace
 EXPOSE 8501
 
-CMD ["streamlit", "run", "/opt/agent/app.py", "--server.address=0.0.0.0", "--server.port=8501", "--server.headless=true"]
+CMD ["streamlit", "run", "/opt/agent/app.py", "--server.address=0.0.0.0", "--server.port=8501", "--server.headless=true", "--server.fileWatcherType=none"]

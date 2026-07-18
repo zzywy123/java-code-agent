@@ -98,6 +98,16 @@ def _discover_java_home(environment: dict[str, str]) -> str | None:
     return str(inferred) if _is_jdk_home(inferred) else None
 
 
+def _remove_secrets(environment: dict[str, str]) -> None:
+    """Prevent untrusted repository build scripts from reading service credentials."""
+    sensitive_suffixes = ("_API_KEY", "_TOKEN", "_SECRET", "_PASSWORD")
+    sensitive_names = {"API_KEY", "TOKEN", "SECRET", "PASSWORD", "PASSWD"}
+    for name in tuple(environment):
+        normalized = name.upper()
+        if normalized in sensitive_names or normalized.endswith(sensitive_suffixes):
+            environment.pop(name, None)
+
+
 class RunTestsTool(BaseTool):
     """Run Maven or Gradle build/test commands.
 
@@ -205,6 +215,7 @@ class RunTestsTool(BaseTool):
         # Execute in sandbox
         child_env = os.environ.copy()
         java_home = _discover_java_home(child_env)
+        _remove_secrets(child_env)
         child_env.pop("AGENT_JAVA_HOME", None)
         if java_home:
             child_env["JAVA_HOME"] = java_home

@@ -7,6 +7,7 @@
 .checkpoints/
 .memory/
 .observability/
+.uploaded-workspaces/
 reports/
 
 # Python tooling
