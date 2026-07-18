@@ -21,3 +21,4 @@ dist/
 build/
 .idea/
 .vscode/
+.uploaded-workspaces-test/
