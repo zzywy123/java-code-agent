@@ -25,11 +25,13 @@ from agent.agents.verifier import VerifierAgent
 from agent.models import (
     CodeChangeArtifact,
     ReviewArtifact,
+    RAGResult,
     SearchArtifact,
     TestResultArtifact,
     ToolResult,
     ToolStatus,
 )
+from agent.tools.factory import create_tool_registry
 
 
 @pytest.fixture
@@ -270,6 +272,93 @@ class TestResearcher:
         researcher = ResearcherAgent(mock_tool_registry, permission_manager, agentic_rag=None)
         result = researcher.run("what does OrderService do?")
         assert isinstance(result, SearchArtifact)
+
+    def test_repository_bug_audit_reads_key_sources_instead_of_searching_bug(
+        self, permission_manager
+    ):
+        registry = MagicMock()
+
+        def execute(name, tool_call_id, **arguments):
+            if name == "list_files":
+                return ToolResult(
+                    tool_call_id=tool_call_id,
+                    name=name,
+                    status=ToolStatus.SUCCESS,
+                    output=(
+                        "目录 . 内容 (4 项):\n"
+                        "📄 src/main/java/demo/Order.java\n"
+                        "📄 src/main/java/demo/OrderController.java\n"
+                        "📄 src/main/java/demo/OrderRepository.java\n"
+                        "📄 src/main/java/demo/OrderService.java"
+                    ),
+                )
+            if name == "read_file":
+                path = arguments["path"]
+                return ToolResult(
+                    tool_call_id=tool_call_id,
+                    name=name,
+                    status=ToolStatus.SUCCESS,
+                    output=f"文件: {path} (第 1-2 行)\n1 | class Example {{}}",
+                )
+            raise AssertionError(f"仓库审查不应调用 {name}")
+
+        registry.execute.side_effect = execute
+        rag = MagicMock()
+        rag.retrieve.return_value = RAGResult(
+            rounds_used=2,
+            evidence_sufficient=False,
+            degraded=True,
+        )
+        researcher = ResearcherAgent(registry, permission_manager, agentic_rag=rag)
+
+        result = researcher.run("这个项目有什么bug？")
+
+        called_tools = [call.kwargs["name"] for call in registry.execute.call_args_list]
+        assert called_tools[0] == "list_files"
+        assert "search_code" not in called_tools
+        assert called_tools.count("read_file") == 4
+        assert result.relevant_files[0].endswith("OrderService.java")
+        assert any("OrderService.java" in item for item in result.tool_evidence)
+        assert "扫描到 4 个 Java 文件" in result.analysis
+        rag.retrieve.assert_called_once()
+
+    def test_specific_bug_question_keeps_identifier_search(
+        self, mock_tool_registry, permission_manager
+    ):
+        rag = MagicMock()
+        rag.retrieve.return_value = RAGResult(rounds_used=1, degraded=True)
+        researcher = ResearcherAgent(
+            mock_tool_registry,
+            permission_manager,
+            agentic_rag=rag,
+        )
+
+        researcher.run("OrderService 有什么 bug？")
+
+        mock_tool_registry.execute.assert_called_once_with(
+            name="search_code",
+            tool_call_id="researcher_evidence",
+            query="OrderService",
+            path=".",
+            file_pattern="*.java",
+        )
+
+    def test_repository_bug_audit_reads_a_real_java_repository(
+        self, tmp_repo, permission_manager
+    ):
+        rag = MagicMock()
+        rag.retrieve.return_value = RAGResult(rounds_used=1, degraded=True)
+        researcher = ResearcherAgent(
+            create_tool_registry(tmp_repo),
+            permission_manager,
+            agentic_rag=rag,
+        )
+
+        result = researcher.run("检查这个工程中可能存在的问题")
+
+        assert any(path.endswith("Hello.java") for path in result.relevant_files)
+        assert any("class Hello" in evidence for evidence in result.tool_evidence)
+        assert "读取 2 个关键实现" in result.analysis
 
     def test_mcp_is_primary_channel_for_direct_git_reads(
         self, mock_tool_registry, permission_manager

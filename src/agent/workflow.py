@@ -351,13 +351,17 @@ def _latest_human_text(messages: list[BaseMessage]) -> str:
 
 def _format_research_context(artifact: SearchArtifact) -> str:
     lines = ["Researcher检索到以下真实代码证据："]
+    if artifact.relevant_files:
+        lines.append(
+            "- 本次实际检查的关键文件：" + ", ".join(artifact.relevant_files[:10])
+        )
     for result in artifact.results[:8]:
         source = result.chunk.slice
         lines.append(
             f"- {source.file_path}:{source.start_line}-{source.end_line} "
             f"{source.symbol_signature}\n{source.content[:1200]}"
         )
-    for evidence in artifact.tool_evidence[:3]:
+    for evidence in artifact.tool_evidence[:5]:
         lines.append(f"- 只读工具证据：\n{evidence[:4000]}")
     if not artifact.results and not artifact.tool_evidence:
         lines.append("- 未检索到充分证据，Coder必须使用只读工具继续定位，禁止猜测。")
@@ -369,7 +373,9 @@ def _answer_from_sources(llm: Any, task: str, artifact: SearchArtifact) -> str:
     response = llm.invoke([
         SystemMessage(content=(
             "你是Java代码研究员。只能根据给出的代码证据回答，并引用真实文件路径和行号。"
-            "证据不足时明确说明，不得编造。\n\n" + context
+            "证据不足时明确说明，不得编造。对于全仓库Bug审查，必须说明实际检查范围，"
+            "并基于已读取代码分析业务逻辑、异常处理和边界条件；禁止因为搜索不到bug、"
+            "TODO或FIXME文本就判断项目没有缺陷。\n\n" + context
         )),
         HumanMessage(content=task),
     ])

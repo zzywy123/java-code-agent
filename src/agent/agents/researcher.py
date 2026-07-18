@@ -23,6 +23,32 @@ from agent.tools.base import ToolRegistry
 
 logger = logging.getLogger(__name__)
 
+REPOSITORY_AUDIT_SCOPES = (
+    "这个项目",
+    "整个项目",
+    "全项目",
+    "项目中",
+    "项目里",
+    "这个工程",
+    "整个工程",
+    "工程中",
+    "工程里",
+    "代码库",
+    "仓库",
+    "全部代码",
+    "所有代码",
+)
+REPOSITORY_AUDIT_INTENTS = (
+    "bug",
+    "问题",
+    "缺陷",
+    "风险",
+    "审查",
+    "检查",
+    "review",
+)
+AUDIT_FILE_LIMIT = 5
+
 
 class ResearcherAgent:
     """Read-only agent for code search and analysis.
@@ -71,6 +97,9 @@ class ResearcherAgent:
                 render_hint="diff" if tool_name == "git_diff" else "text",
             )
 
+        if self._is_repository_audit(task):
+            return self._audit_repository(task)
+
         # Use Agentic RAG if available
         if self._rag:
             identifier = self._extract_identifier(task)
@@ -107,6 +136,94 @@ class ResearcherAgent:
 
         # Fallback: basic search using search_code tool
         return self._basic_search(task)
+
+    def _audit_repository(self, task: str) -> SearchArtifact:
+        """Collect representative source evidence for a repository-wide review."""
+        listing, list_channel = self._execute_read_tool(
+            "list_files",
+            {"path": ".", "pattern": "**/*.java"},
+            tool_call_id="researcher_audit_files",
+        )
+        java_paths = self._parse_java_paths(listing.output)
+        selected_paths = self._select_audit_files(java_paths)
+        tool_evidence: list[str] = []
+
+        for index, path in enumerate(selected_paths, 1):
+            result, channel = self._execute_read_tool(
+                "read_file",
+                {"path": path, "start_line": 1, "end_line": 500},
+                tool_call_id=f"researcher_audit_source_{index}",
+            )
+            if result.status == ToolStatus.SUCCESS and result.output:
+                tool_evidence.append(
+                    f"[{channel}:read_file repository-audit]\n{result.output[:8000]}"
+                )
+
+        rag_results: list[SearchResult] = []
+        rag_analysis = "未启用 RAG"
+        if self._rag is not None:
+            audit_query = (
+                f"{task} Java null exception validation calculation state transition "
+                "transaction boundary concurrency authorization resource leak"
+            )
+            rag_result = self._rag.retrieve(audit_query)
+            rag_results = rag_result.sources
+            rag_analysis = (
+                f"RAG {rag_result.rounds_used} 轮，"
+                f"证据{'充分' if rag_result.evidence_sufficient else '不足'}"
+                f"{'（已降级）' if rag_result.degraded else ''}"
+            )
+
+        return ArtifactFactory.create_search_artifact(
+            query=task,
+            results=rag_results,
+            analysis=(
+                f"{list_channel} 扫描到 {len(java_paths)} 个 Java 文件，"
+                f"读取 {len(tool_evidence)} 个关键实现；{rag_analysis}"
+            ),
+            relevant_files=selected_paths,
+            tool_evidence=tool_evidence,
+        )
+
+    @staticmethod
+    def _is_repository_audit(task: str) -> bool:
+        normalized = task.strip().lower()
+        return any(scope in normalized for scope in REPOSITORY_AUDIT_SCOPES) and any(
+            intent in normalized for intent in REPOSITORY_AUDIT_INTENTS
+        )
+
+    @staticmethod
+    def _parse_java_paths(listing: str) -> list[str]:
+        paths: list[str] = []
+        for line in listing.splitlines():
+            match = re.match(r"^\s*(?:📄\s+)?([^\r\n]+\.java)\s*$", line)
+            if match:
+                paths.append(match.group(1).strip().replace("\\", "/"))
+        return list(dict.fromkeys(paths))
+
+    @staticmethod
+    def _select_audit_files(paths: list[str]) -> list[str]:
+        def priority(path: str) -> tuple[int, str]:
+            lowered = path.lower()
+            name = lowered.rsplit("/", 1)[-1]
+            score = 50 if "/src/main/" in f"/{lowered}" else 0
+            if "/src/test/" in f"/{lowered}" or name.endswith("test.java"):
+                score -= 50
+            weights = (
+                ("service", 60),
+                ("controller", 50),
+                ("security", 45),
+                ("auth", 45),
+                ("repository", 30),
+                ("handler", 25),
+                ("manager", 25),
+                ("config", 10),
+                ("application", -10),
+            )
+            score += sum(weight for marker, weight in weights if marker in name)
+            return -score, lowered
+
+        return sorted(paths, key=priority)[:AUDIT_FILE_LIMIT]
 
     @staticmethod
     def _extract_identifier(task: str) -> str:
